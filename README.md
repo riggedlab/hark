@@ -24,6 +24,8 @@ hark/
 ├── server/              # 云端盲信箱 (纯 Go 标准库，零外部依赖，<15MB 镜像)
 ├── desktop/             # 电脑管理端 (Go + MyGo + Bun：菜单栏常驻 + 语音存档检索导出 + ASR 接入测活)
 ├── cmd/hark-worker/     # 无界面命令行版 (单二进制，给 NAS / Linux 服务器常驻运行)
+├── cmd/hark/            # 本地 AI Agent 只读查询 CLI（另含 worker / gen-key 兼容入口）
+├── skills/hark/         # 本地 Agent 语音存档查询技能
 ├── internal/
 │   ├── protocol/        # 盲信箱 /v2 接口数据结构与服务端实现
 │   ├── e2ee/            # AES-256-GCM 封包与文件名 HMAC（与安卓端字节级兼容）
@@ -55,6 +57,7 @@ hark/
 - **iOS 手机端**：待开发，后续版本补齐
 - **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:latest` 或 `hark-mailbox-linux-*` 单二进制
 - **无界面 Worker（NAS / 服务器）**：`hark-worker-*` 单二进制
+- **本地 AI Agent 查询 CLI**：`hark-*` 单二进制（如 `hark-linux-amd64`）
 
 ## 从源码快速跑通
 
@@ -101,6 +104,39 @@ CGO_ENABLED=0 go build -o hark-worker ./cmd/hark-worker
 ./firmware/flash.sh recorder
 ```
 
+## 接入本地 AI Agent（Claude Code / Pi / Codex）
+
+在仓库根目录构建，并把二进制目录加入当前 shell 的 PATH：
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ./bin/hark ./cmd/hark
+export PATH="$PWD/bin:$PATH"
+hark status
+hark timeline --date today
+hark search "接口" --date 30d --speaker "老王"
+hark get 20261112-143000 --json
+```
+
+将本仓库的 `skills/hark` 软链到所用 Agent 的技能目录（按需选择，手动执行）：
+
+```sh
+# Claude Code
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/hark" ~/.claude/skills/hark
+# Pi
+mkdir -p ~/.pi/agent/skills
+ln -s "$PWD/skills/hark" ~/.pi/agent/skills/hark
+# Codex（也可供采用此技能目录的其他 Agent 使用）
+mkdir -p ~/.agents/skills
+ln -s "$PWD/skills/hark" ~/.agents/skills/hark
+```
+
+Hermes 等支持 `SKILL.md` 的本地 Agent 也可将同一目录链接到其技能目录。已存在同名技能时先自行核对，不覆盖已有文件。
+
+查询命令只读本地存档，支持 `--json`，无需服务器凭据或钥匙串。数据目录优先级为 `--data-dir` → `HARK_HOME` / `DITING_HOME` → 配置 JSON 的 `data_dir` → `~/hark`；配置默认 `~/.config/hark/config.json`（可用 `HARK_CONF` 或 `--config` 指定），兼容已有 `diting.db`。还没有数据库时会提示“本地暂无录音存档”，不会创建空库。
+
+`timeline` 默认查询今天最近 200 条，按时间正序返回完整对话；`search` 默认查询最近 30 天的 30 条，返回命中片段；两者均支持 `--date today|yesterday|7d|30d|all|YYYY-MM-DD`、`--speaker`（ID 或名称）、`--limit`、`--offset`。用 `get <name...>` 查看完整上下文，文件名可省略 `.opus`，flags 可在位置参数前后。`hark worker [flags]` 与 `hark-worker` 共用同一引擎及原 flags；`hark gen-key` 生成共享密钥。这两个维护命令不属于只读查询。
+
 ## 本地自动化验证
 
 在仓库根目录执行：
@@ -108,7 +144,11 @@ CGO_ENABLED=0 go build -o hark-worker ./cmd/hark-worker
 ```sh
 # 1. Go 全量单测与全链路 E2EE 集成测试
 CGO_ENABLED=0 go test ./...
-go test -race ./internal/... ./server
+go test -race ./internal/... ./server ./cmd/...
+
+# CLI 实跑：使用临时目录与合成 WAL 数据，不访问个人存档
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark ./cmd/hark
+python3 cmd/hark/smoke_test.py /tmp/hark
 
 # 2. 桌面端前端类型检查与原生应用打包
 (cd desktop && bun run build)

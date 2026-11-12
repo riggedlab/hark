@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -243,48 +244,8 @@ func (s *Store) RecordASRRun(name string, ok bool, latencyMs int64, durationS fl
 
 // speakerMapLocked 返回 speakerID -> (canonicalID, displayLabel)。
 func (s *Store) speakerMapLocked() map[string]SpeakerBadge {
-	rows, err := s.db.Query(`SELECT id, COALESCE(merged_into, ''), COALESCE(display_name, '') FROM speakers`)
-	if err != nil {
-		return map[string]SpeakerBadge{}
-	}
-	defer rows.Close()
-
-	type rawSpk struct {
-		merged string
-		name   string
-	}
-	raw := map[string]rawSpk{}
-	for rows.Next() {
-		var id, m, n string
-		if rows.Scan(&id, &m, &n) == nil {
-			raw[id] = rawSpk{merged: m, name: n}
-		}
-	}
-
-	resolve := func(id string) string {
-		seen := map[string]bool{}
-		cur := id
-		for cur != "" && !seen[cur] {
-			seen[cur] = true
-			r, ok := raw[cur]
-			if !ok || r.merged == "" {
-				return cur
-			}
-			cur = r.merged
-		}
-		return cur
-	}
-
-	out := map[string]SpeakerBadge{}
-	for id := range raw {
-		canon := resolve(id)
-		label := raw[canon].name
-		if label == "" {
-			label = formatDefaultSpeakerLabel(canon)
-		}
-		out[id] = SpeakerBadge{ID: canon, Label: label}
-	}
-	return out
+	records, _ := s.readSpeakersLocked()
+	return speakerMapFromRecords(records)
 }
 
 func formatDefaultSpeakerLabel(sid string) string {
@@ -297,72 +258,105 @@ func formatDefaultSpeakerLabel(sid string) string {
 	return sid
 }
 
+// matchingSpeakerIDs expands a source ID or display name to the entire merged group.
+func matchingSpeakerIDs(who string, spkMap map[string]SpeakerBadge) map[string]bool {
+	who = strings.ToLower(strings.TrimSpace(who))
+	canonical := map[string]bool{}
+	for rawID, badge := range spkMap {
+		if strings.ToLower(rawID) == who || strings.ToLower(badge.ID) == who {
+			canonical[badge.ID] = true
+		}
+	}
+	if len(canonical) == 0 && who != "" {
+		for _, badge := range spkMap {
+			if strings.Contains(strings.ToLower(badge.Label), who) {
+				canonical[badge.ID] = true
+			}
+		}
+	}
+	out := map[string]bool{}
+	for rawID, badge := range spkMap {
+		if canonical[badge.ID] {
+			out[rawID], out[badge.ID] = true, true
+		}
+	}
+	if len(out) == 0 && who != "" {
+		out[who] = true // Includes recording-local other_N speakers.
+	}
+	return out
+}
+
+const segmentRows = `json_each(CASE WHEN json_valid(segments) THEN segments ELSE '[]' END)`
+
+func speakerCondition(ids map[string]bool) (string, []any) {
+	keys := make([]string, 0, len(ids))
+	for id := range ids {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	args := make([]any, len(keys))
+	for i, id := range keys {
+		args[i] = id
+	}
+	return `EXISTS (SELECT 1 FROM ` + segmentRows + ` AS seg
+		WHERE json_extract(seg.value, '$.speaker') IN (` + strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",") + `))`, args
+}
+
 func buildWhereClause(f ArchiveFilter, spkMap map[string]SpeakerBadge) (string, []any) {
 	var conds []string
 	var args []any
 
 	now := time.Now()
-	switch strings.TrimSpace(f.DateRange) {
+	date := strings.TrimSpace(f.DateRange)
+	switch date {
 	case "", "all":
 	case "today":
 		conds = append(conds, "started_at >= ?")
 		args = append(args, now.Format("2006-01-02")+"T00:00:00")
-	case "7d":
+	case "yesterday":
+		day := now.AddDate(0, 0, -1).Format("2006-01-02")
+		conds = append(conds, "started_at >= ? AND started_at < ?")
+		args = append(args, day+"T00:00:00", now.Format("2006-01-02")+"T00:00:00")
+	case "7d", "30d":
+		days := -6
+		if date == "30d" {
+			days = -29
+		}
 		conds = append(conds, "started_at >= ?")
-		args = append(args, now.AddDate(0, 0, -6).Format("2006-01-02")+"T00:00:00")
-	case "30d":
-		conds = append(conds, "started_at >= ?")
-		args = append(args, now.AddDate(0, 0, -29).Format("2006-01-02")+"T00:00:00")
+		args = append(args, now.AddDate(0, 0, days).Format("2006-01-02")+"T00:00:00")
 	default:
-		if len(f.DateRange) == 10 {
-			conds = append(conds, "started_at >= ? AND started_at <= ?")
-			args = append(args, f.DateRange+"T00:00:00", f.DateRange+"T23:59:59")
+		if day, err := time.Parse("2006-01-02", date); err == nil {
+			conds = append(conds, "started_at >= ? AND started_at < ?")
+			args = append(args, date+"T00:00:00", day.AddDate(0, 0, 1).Format("2006-01-02")+"T00:00:00")
 		}
 	}
 
 	if q := strings.TrimSpace(f.Query); q != "" {
-		like := "%" + q + "%"
-		// 支持直接按手机同步过来的人名搜索录音
-		var matchedIDs []string
-		qLower := strings.ToLower(q)
+		// Query strings are literal substrings, including SQL LIKE metacharacters.
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(q) + "%"
+		sub := []string{`text LIKE ? ESCAPE '\'`, `name LIKE ? ESCAPE '\'`,
+			`EXISTS (SELECT 1 FROM ` + segmentRows + ` AS seg WHERE json_extract(seg.value, '$.text') LIKE ? ESCAPE '\')`}
+		args = append(args, like, like, like)
+		matched := map[string]bool{}
 		for rawID, badge := range spkMap {
-			if strings.Contains(strings.ToLower(badge.Label), qLower) || strings.Contains(strings.ToLower(badge.ID), qLower) {
-				matchedIDs = append(matchedIDs, rawID)
+			if strings.Contains(strings.ToLower(badge.Label), strings.ToLower(q)) ||
+				strings.Contains(strings.ToLower(badge.ID), strings.ToLower(q)) {
+				matched[rawID] = true
 			}
 		}
-		if len(matchedIDs) > 0 {
-			var sub []string
-			sub = append(sub, "text LIKE ?", "name LIKE ?")
-			args = append(args, like, like)
-			for _, mid := range matchedIDs {
-				sub = append(sub, "segments LIKE ?")
-				args = append(args, "%\""+mid+"\"%")
-			}
-			conds = append(conds, "("+strings.Join(sub, " OR ")+")")
-		} else {
-			conds = append(conds, "(text LIKE ? OR name LIKE ?)")
-			args = append(args, like, like)
-		}
-	}
-
-	if spk := strings.TrimSpace(f.SpeakerID); spk != "" {
-		var matchIDs []string
-		for rawID, badge := range spkMap {
-			if badge.ID == spk || rawID == spk {
-				matchIDs = append(matchIDs, rawID)
-			}
-		}
-		if len(matchIDs) == 0 {
-			matchIDs = []string{spk}
-		}
-		var sub []string
-		for _, mid := range matchIDs {
-			sub = append(sub, "segments LIKE ?")
-			args = append(args, "%\""+mid+"\"%")
+		if len(matched) > 0 {
+			condition, values := speakerCondition(matched)
+			sub = append(sub, condition)
+			args = append(args, values...)
 		}
 		conds = append(conds, "("+strings.Join(sub, " OR ")+")")
 	}
 
+	if spk := strings.TrimSpace(f.SpeakerID); spk != "" {
+		condition, values := speakerCondition(matchingSpeakerIDs(spk, spkMap))
+		conds = append(conds, condition)
+		args = append(args, values...)
+	}
 	if len(conds) == 0 {
 		return "", nil
 	}
@@ -464,36 +458,12 @@ func (s *Store) GetDetail(name string) (TranscriptDetail, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	spkMap := s.speakerMapLocked()
-	var d TranscriptDetail
-	var rawSegs string
-	err := s.db.QueryRow(`
-		SELECT name, COALESCE(started_at, ''), COALESCE(duration_s, 0), COALESCE(speech_s, 0),
-		       COALESCE(engine, ''), COALESCE(model, ''), COALESCE(text, ''), COALESCE(segments, '[]')
-		FROM transcripts WHERE name = ?`, name).Scan(
-		&d.Name, &d.StartedAt, &d.DurationS, &d.SpeechS, &d.Engine, &d.Model, &d.Text, &rawSegs,
-	)
+	records, err := s.readSpeakersLocked()
 	if err != nil {
 		return TranscriptDetail{}, err
 	}
-
-	var segs []protocol.Segment
-	_ = json.Unmarshal([]byte(rawSegs), &segs)
-	d.Segments = make([]ResolvedSegment, 0, len(segs))
-	for _, seg := range segs {
-		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text}
-		if seg.Speaker != nil && *seg.Speaker != "" {
-			if b, ok := spkMap[*seg.Speaker]; ok {
-				rs.SpeakerID = b.ID
-				rs.SpeakerLabel = b.Label
-			} else {
-				rs.SpeakerID = *seg.Speaker
-				rs.SpeakerLabel = formatDefaultSpeakerLabel(*seg.Speaker)
-			}
-		}
-		d.Segments = append(d.Segments, rs)
-	}
-	return d, nil
+	return scanTranscript(s.db.QueryRow(`SELECT `+transcriptColumns+` FROM transcripts WHERE name = ?`, name),
+		speakerMapFromRecords(records))
 }
 
 func (s *Store) DeleteTranscript(name string) error {

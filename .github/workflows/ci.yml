@@ -32,12 +32,16 @@ jobs:
       - name: Run Go tests (pure Go & race detector)
         run: |
           CGO_ENABLED=0 go test ./...
-          go test -race ./internal/... ./server
+          go test -race ./internal/... ./server ./cmd/...
 
-      - name: Build server & headless worker binaries
+      - name: Build server, headless worker & query CLI binaries
         run: |
           CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark-mailbox ./server
           CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark-worker ./cmd/hark-worker
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark ./cmd/hark
+
+      - name: Exercise CLI against empty & live WAL archives
+        run: python3 cmd/hark/smoke_test.py /tmp/hark
 
       - uses: oven-sh/setup-bun@v2
 

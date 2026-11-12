@@ -62,6 +62,7 @@ jobs:
               '- **Android 手机端**：下载 `hark-*-android-arm64.apk` 直接覆盖安装（支持应用内「设备状态 → 检查更新」）。' \
               '- **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:'"${{ steps.meta.outputs.version }}"'` 或直接下载 `hark-mailbox-linux-*` 单二进制。' \
               '- **NAS / 无界面 Worker**：下载 `hark-worker-*` 单二进制。' \
+              '- **本地 AI Agent 查询 CLI**：下载对应平台的 `hark-linux-*`、`hark-darwin-*` 或 `hark-windows-*.exe` 单二进制。' \
               '')"
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
               --draft --verify-tag --title "Hark $GITHUB_REF_NAME" \
@@ -222,6 +223,8 @@ jobs:
             [ "$1" = "windows" ] && ext=".exe"
             CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" \
               -o "bin-upload/hark-worker-${1}-${2}${ext}" ./cmd/hark-worker
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" \
+              -o "bin-upload/hark-${1}-${2}${ext}" ./cmd/hark
           done
 
       - name: Upload static binaries to draft release
