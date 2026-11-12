@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -186,7 +187,21 @@ func (e *Engine) Status() RuntimeStatus {
 	return st
 }
 
-// CheckMailbox 测试信箱服务器 /v2/health 与 WORKER_TOKEN 鉴权是否通过。
+// HttpStatusError 标记信箱返回的确切 HTTP 状态码错误，便于区分鉴权/路径配置错误（立即提示）与瞬时网络抖动（重试容忍）。
+type httpStatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *httpStatusError) Error() string { return e.Msg }
+
+func isHardError(err error) bool {
+	var se *httpStatusError
+	if errors.As(err, &se) {
+		return se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden || se.Code == http.StatusNotFound || se.Code == http.StatusBadRequest
+	}
+	return false
+}
 func CheckMailbox(ctx context.Context, cfg Config) error {
 	if strings.TrimSpace(cfg.ServerURL) == "" {
 		return errors.New("未填写信箱服务器地址")
@@ -272,7 +287,17 @@ func (e *Engine) runHeartbeat(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	e.mu.Lock()
+	hbClient, clientErr := newHTTPClient(e.cfg, 12*time.Second)
+	e.mu.Unlock()
+	if hbClient != nil {
+		defer hbClient.CloseIdleConnections()
+	}
+
 	publish := func() {
+		if clientErr != nil || hbClient == nil {
+			return
+		}
 		e.mu.Lock()
 		cfg := e.cfg
 		hasStore := e.store != nil
@@ -284,11 +309,7 @@ func (e *Engine) runHeartbeat(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		client, err := newHTTPClient(cfg, 10*time.Second)
-		if err != nil {
-			return
-		}
-		e.publishHeartbeatOnce(ctx, cfg, key, client)
+		e.publishHeartbeatOnce(ctx, cfg, key, hbClient)
 	}
 
 	publish()
@@ -368,6 +389,31 @@ func (e *Engine) runLoop(ctx context.Context) {
 	defer e.wg.Done()
 	ver := -1
 	initialized := false
+	transientErrs := 0
+
+	e.mu.Lock()
+	pollClient, clientErr := newHTTPClient(e.cfg, 35*time.Second)
+	e.mu.Unlock()
+	if pollClient != nil {
+		defer pollClient.CloseIdleConnections()
+	}
+
+	handlePollErr := func(err error) {
+		if isHardError(err) {
+			transientErrs = 3
+			e.setError(err.Error())
+			sleepCtx(ctx, 5*time.Second)
+			return
+		}
+		transientErrs++
+		// 跨境长轮询偶发单次 EOF / 握手抖动属于常态，连续 3 次失败才亮红灯报「同步受阻」
+		if transientErrs >= 3 {
+			e.setError(err.Error())
+			sleepCtx(ctx, 4*time.Second)
+		} else {
+			sleepCtx(ctx, 1500*time.Millisecond)
+		}
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -377,6 +423,7 @@ func (e *Engine) runLoop(ctx context.Context) {
 		cfg := e.cfg
 		paused := e.paused
 		hasStore := e.store != nil
+		inErr := e.phase == "error"
 		e.mu.Unlock()
 
 		key, cfgErr := cfg.ValidateReady()
@@ -389,36 +436,39 @@ func (e *Engine) runLoop(ctx context.Context) {
 			}
 		}
 
-		client, err := newHTTPClient(cfg, 40*time.Second)
-		if err != nil {
-			e.setError(err.Error())
+		if clientErr != nil || pollClient == nil {
+			e.setError(clientErr.Error())
 			sleepCtx(ctx, 5*time.Second)
 			continue
 		}
 
 		if !initialized {
-			if err := e.syncPhoneSpeakers(ctx, cfg, key, client); err != nil {
-				e.setError(err.Error())
-				sleepCtx(ctx, 5*time.Second)
+			if err := e.syncPhoneSpeakers(ctx, cfg, key, pollClient); err != nil {
+				handlePollErr(err)
 				continue
 			}
-			if err := e.pushMacRoster(ctx, cfg, key, client); err != nil {
-				e.setError(err.Error())
-				sleepCtx(ctx, 5*time.Second)
+			if err := e.pushMacRoster(ctx, cfg, key, pollClient); err != nil {
+				handlePollErr(err)
 				continue
 			}
 			initialized = true
 		}
 
-		nextVer, batchFailed, err := e.pollAndProcessBatch(ctx, cfg, key, client, ver, 25)
+		// 刚经历过抖动或处于报错态时先发 wait=0 秒级探活立即消警，成功后再恢复 20 秒长轮询
+		waitS := 20
+		if transientErrs > 0 || inErr {
+			waitS = 0
+		}
+
+		nextVer, batchFailed, err := e.pollAndProcessBatch(ctx, cfg, key, pollClient, ver, waitS)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			e.setError(err.Error())
-			sleepCtx(ctx, 5*time.Second)
+			handlePollErr(err)
 			continue
 		}
+		transientErrs = 0
 		ver = nextVer
 		if !batchFailed {
 			e.recoverFromError()
@@ -483,10 +533,13 @@ func (e *Engine) pollAndProcessBatch(ctx context.Context, cfg Config, key []byte
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return ver, false, errors.New("信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）")
+		return ver, false, &httpStatusError{Code: http.StatusNotFound, Msg: "信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）"}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ver, false, &httpStatusError{Code: resp.StatusCode, Msg: fmt.Sprintf("信箱鉴权失败 (HTTP %d)，请核对连接令牌 WORKER_TOKEN", resp.StatusCode)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return ver, false, fmt.Errorf("拉取队列返回 HTTP %d", resp.StatusCode)
+		return ver, false, &httpStatusError{Code: resp.StatusCode, Msg: fmt.Sprintf("拉取队列返回 HTTP %d", resp.StatusCode)}
 	}
 	var list protocol.InboxListResp
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
@@ -673,10 +726,13 @@ func (e *Engine) syncPhoneSpeakers(ctx context.Context, cfg Config, key []byte, 
 		return nil
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return errors.New("信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）")
+		return &httpStatusError{Code: http.StatusNotFound, Msg: "信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）"}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &httpStatusError{Code: resp.StatusCode, Msg: fmt.Sprintf("信箱鉴权失败 (HTTP %d)，请核对连接令牌 WORKER_TOKEN", resp.StatusCode)}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("读取 speakers_phone 返回 HTTP %d", resp.StatusCode)
+		return &httpStatusError{Code: resp.StatusCode, Msg: fmt.Sprintf("读取 speakers_phone 返回 HTTP %d", resp.StatusCode)}
 	}
 	slotVer := ParseVerHeader(resp.Header)
 	e.mu.Lock()
@@ -752,7 +808,19 @@ func parseStartedAt(name string) string {
 }
 
 func newHTTPClient(cfg Config, timeout time.Duration) (*http.Client, error) {
-	tr := &http.Transport{Proxy: nil} // 不走系统 HTTP 代理，与原 trust_env=False 保持一致
+	tr := &http.Transport{
+		Proxy: nil, // 不走系统 HTTP 代理，防止本机代理拦截或断开长轮询
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 15 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          8,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       45 * time.Second,
+		TLSHandshakeTimeout:   12 * time.Second,
+		ResponseHeaderTimeout: timeout,
+	}
 	if caPath := strings.TrimSpace(cfg.ServerCA); caPath != "" {
 		pemBytes, err := os.ReadFile(expandHome(caPath))
 		if err != nil {
@@ -768,7 +836,7 @@ func newHTTPClient(cfg Config, timeout time.Duration) (*http.Client, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	return &http.Client{Timeout: timeout, Transport: tr}, nil
+	return &http.Client{Timeout: timeout + 5*time.Second, Transport: tr}, nil
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) {
