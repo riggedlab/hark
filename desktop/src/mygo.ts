@@ -61,6 +61,8 @@ export interface AsrConfig {
 }
 
 export interface BootstrapPayload {
+  app_version: string;
+  available_update?: string;
   config: Config;
   status: RuntimeStatus;
   stats: ArchiveStats;
@@ -89,6 +91,7 @@ export interface CopyResult {
 export interface LiveSnapshot {
   status: RuntimeStatus;
   stats: ArchiveStats;
+  available_update?: string;
 }
 
 export interface MailboxTestResult {
@@ -172,6 +175,9 @@ export const Hark = {
   },
   bootstrap(): Promise<BootstrapPayload> {
     return call("Hark.Bootstrap");
+  },
+  checkForUpdates(): Promise<void> {
+    return call("Hark.CheckForUpdates");
   },
   copyMarkdown(filter: ArchiveFilter): Promise<CopyResult> {
     return call("Hark.CopyMarkdown", filter);

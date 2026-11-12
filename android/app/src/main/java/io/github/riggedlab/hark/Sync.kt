@@ -19,6 +19,7 @@ import kotlin.coroutines.resumeWithException
 object Sync {
     private val polling = Mutex()
     private val pushing = Mutex()
+    @Volatile private var pollFailures = 0
 
     fun writeFile(file: File, text: String) {
         val tmp = File(file.parentFile, ".${file.name}.tmp")
@@ -77,7 +78,8 @@ object Sync {
         try {
             if (!pushSpeakerEdits(ctx)) return@withLock false
             val p = ctx.getSharedPreferences("sync_state", Context.MODE_PRIVATE)
-            var wait = waitSec.coerceIn(0, 25)
+            val recovering = pollFailures > 0 || AppState.status.value.remote.mailboxReachable == false
+            var wait = if (recovering) 0 else waitSec.coerceIn(0, 20)
             do {
                 val query = "ver=${p.getInt("ver", -1)}&after_seq=${p.getLong("after_seq", 0)}" +
                     "&ws_ver=${p.getInt("ws_ver", 0)}&sm_ver=${p.getInt("sm_ver", 0)}&sp_ver=${p.getInt("sp_ver", 0)}&wait=$wait"
@@ -122,11 +124,16 @@ object Sync {
                 AppState.update { it.copy(textVersion = it.textVersion + texts.length()) }
                 wait = 0
             } while (result.getBoolean("has_more"))
+            pollFailures = 0
             true
         } catch (e: CancellationException) { throw e
         } catch (e: Exception) {
-            AppState.updateRemote { it.copy(mailboxReachable = false, mailboxError = e.message?.take(120)) }
-            Log.w("Sync", "同步失败：${e.message}")
+            val msg = e.message?.take(120) ?: ""
+            val hard = msg.contains("HTTP 401") || msg.contains("HTTP 403") || msg.contains("HTTP 404") || e is javax.crypto.AEADBadTagException
+            if (hard || ++pollFailures >= 3) {
+                AppState.updateRemote { it.copy(mailboxReachable = false, mailboxError = msg.ifBlank { null }) }
+            }
+            Log.w("Sync", "同步失败 ($pollFailures)：$msg")
             false
         }
     }

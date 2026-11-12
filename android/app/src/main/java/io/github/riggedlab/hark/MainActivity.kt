@@ -403,12 +403,32 @@ class MainActivity : ComponentActivity() {
             })
             InfoRow("转写端", workerLabel(remote))
             InfoRow("定位", if (hasLocation) "已开启（记录只存在手机上）" else "未开启")
+            var updateHint by remember { mutableStateOf<String?>(null) }
+            var updateUrl by remember { mutableStateOf<String?>(null) }
+            var checkingUpdate by remember { mutableStateOf(false) }
+            val updateScope = rememberCoroutineScope()
+            updateHint?.let { InfoRow("版本", it) }
             Spacer(Modifier.height(16.dp))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (s.link == LinkState.STOPPED) Button(onClick = { requestStart() }) { Text("开始录音") }
                 else OutlinedButton(onClick = { stopRecorder() }) { Text("停止录音") }
                 OutlinedButton(onClick = { editingServer = true }) { Text("服务器设置") }
                 OutlinedButton(onClick = { requestStart(repair = true) }) { Text("重新配对") }
+                if (updateUrl != null) {
+                    Button(onClick = {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(updateUrl)))
+                    }) { Text("下载新版本") }
+                } else {
+                    OutlinedButton(enabled = !checkingUpdate, onClick = {
+                        checkingUpdate = true
+                        updateScope.launch {
+                            val (hint, url) = withContext(Dispatchers.IO) { checkGitHubUpdate() }
+                            updateHint = hint
+                            updateUrl = url
+                            checkingUpdate = false
+                        }
+                    }) { Text(if (checkingUpdate) "检查中…" else "检查更新 (v${BuildConfig.VERSION_NAME})") }
+                }
                 if (!whitelisted) OutlinedButton(onClick = { requestBatteryWhitelist() }) { Text("允许后台运行") }
                 if (!hasLocation) OutlinedButton(onClick = { requestLocation() }) { Text("开启定位") }
             }
@@ -1106,6 +1126,46 @@ class MainActivity : ComponentActivity() {
         seconds < 3600 -> "${(seconds / 60).toInt()}分钟"
         seconds < 86400 -> "${(seconds / 3600).toInt()}小时"
         else -> "${(seconds / 86400).toInt()}天"
+    }
+
+    private fun checkGitHubUpdate(): Pair<String, String?> = try {
+        val conn = java.net.URL("https://api.github.com/repos/riggedlab/hark/releases/latest").openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 8_000
+        conn.readTimeout = 8_000
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        if (conn.responseCode == 404) {
+            "当前 v${BuildConfig.VERSION_NAME}（仓库尚未设为公开）" to null
+        } else {
+            check(conn.responseCode == 200) { "HTTP ${conn.responseCode}" }
+            val json = org.json.JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+            val tag = json.optString("tag_name").removePrefix("v")
+            if (isNewerSemVer(tag, BuildConfig.VERSION_NAME)) {
+                val assets = json.optJSONArray("assets")
+                var apk: String? = null
+                if (assets != null) {
+                    for (i in 0 until assets.length()) {
+                        val u = assets.getJSONObject(i).optString("browser_download_url")
+                        if (u.endsWith(".apk")) { apk = u; break }
+                    }
+                }
+                "发现新版本 v$tag（当前 v${BuildConfig.VERSION_NAME}）" to (apk ?: json.optString("html_url"))
+            } else {
+                "已是最新版本 v${BuildConfig.VERSION_NAME}" to null
+            }
+        }
+    } catch (e: Exception) {
+        "检查更新失败：${e.message?.take(60)}" to null
+    }
+
+    private fun isNewerSemVer(candidate: String, current: String): Boolean {
+        val c1 = candidate.substringBefore("-").split(".").mapNotNull { it.toIntOrNull() }
+        val c2 = current.substringBefore("-").split(".").mapNotNull { it.toIntOrNull() }
+        for (i in 0 until maxOf(c1.size, c2.size)) {
+            val a = c1.getOrElse(i) { 0 }
+            val b = c2.getOrElse(i) { 0 }
+            if (a != b) return a > b
+        }
+        return false
     }
 
     companion object {

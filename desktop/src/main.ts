@@ -17,6 +17,8 @@ type Tab = "archive" | "asr" | "system";
 
 interface UIState {
   tab: Tab;
+  appVersion: string;
+  availableUpdate: string;
   config: Config | null;
   draft: Config | null;
   dirty: boolean;
@@ -51,6 +53,8 @@ interface UIState {
 
 const state: UIState = {
   tab: "archive",
+  appVersion: "0.1.0",
+  availableUpdate: "",
   config: null,
   draft: null,
   dirty: false,
@@ -299,7 +303,7 @@ function renderSidebar(): string {
       <div class="sidebar-drag"></div>
       <div class="brand">
         <span class="brand-name">Hark · 谛听</span>
-        <span class="brand-sub">DT-1</span>
+        <span class="brand-sub num">v${escapeHTML(state.appVersion)}</span>
       </div>
 
       <div class="status-box">
@@ -783,7 +787,17 @@ function renderSystemWorkspace(): string {
         </div>
 
         <div class="panel">
-          <h3 class="panel-title">桌面常驻</h3>
+          <div class="panel-head">
+            <h3 class="panel-title">桌面常驻与自动更新</h3>
+            <div style="display:flex;align-items:center;gap:8px;">
+              ${
+                state.availableUpdate
+                  ? `<span class="spk-pill named num">新版本 v${escapeHTML(state.availableUpdate)}</span>`
+                  : `<span style="font-size:var(--fs-meta);color:var(--text-muted);" class="num">当前 v${escapeHTML(state.appVersion)}</span>`
+              }
+              <button class="btn" data-action="check-updates">检查更新…</button>
+            </div>
+          </div>
           <div class="toggle-row" data-switch="close_to_tray">
             <span>关闭窗口时退驻菜单栏继续后台拉取</span>
             <button type="button" class="switch" role="switch" aria-checked="${d.close_to_tray}" aria-label="关闭窗口退驻菜单栏"></button>
@@ -1048,6 +1062,10 @@ function bindGlobalListeners() {
         await Hark.revealDatabase();
         break;
       }
+      case "check-updates": {
+        await Hark.checkForUpdates();
+        break;
+      }
       case "pick-ca": {
         if (!state.draft) break;
         const chosen = await Hark.pickCAFile();
@@ -1152,6 +1170,8 @@ function bindGlobalListeners() {
 async function init() {
   bindGlobalListeners();
   const boot = await Hark.bootstrap();
+  state.appVersion = boot.app_version || "0.1.0";
+  state.availableUpdate = boot.available_update || "";
   state.config = boot.config;
   state.draft = cloneConfig(boot.config);
   if (boot.config.asr.base_url) {
@@ -1171,6 +1191,7 @@ async function init() {
     const prevRoster = state.status?.roster_ver ?? 0;
     state.status = snap.status;
     state.stats = snap.stats;
+    state.availableUpdate = snap.available_update || "";
     if (snap.stats.total_recordings !== prevCount || snap.status.roster_ver !== prevRoster) {
       void refreshArchive(true);
     } else {

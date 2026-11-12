@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater"
 	"github.com/riggedlab/hark/internal/asr"
 	"github.com/riggedlab/hark/internal/e2ee"
 	"github.com/riggedlab/hark/internal/worker"
@@ -38,16 +39,19 @@ func (mygoSecretStore) Delete(key string) error {
 }
 
 type LiveSnapshot struct {
-	Status worker.RuntimeStatus `json:"status"`
-	Stats  worker.ArchiveStats  `json:"stats"`
+	Status          worker.RuntimeStatus `json:"status"`
+	Stats           worker.ArchiveStats  `json:"stats"`
+	AvailableUpdate string               `json:"available_update,omitempty"`
 }
 
 type BootstrapPayload struct {
-	Config         worker.Config        `json:"config"`
-	Status         worker.RuntimeStatus `json:"status"`
-	Stats          worker.ArchiveStats  `json:"stats"`
-	Presets        []asr.Preset         `json:"presets"`
-	KeychainActive bool                 `json:"keychain_active"`
+	AppVersion      string               `json:"app_version"`
+	AvailableUpdate string               `json:"available_update,omitempty"`
+	Config          worker.Config        `json:"config"`
+	Status          worker.RuntimeStatus `json:"status"`
+	Stats           worker.ArchiveStats  `json:"stats"`
+	Presets         []asr.Preset         `json:"presets"`
+	KeychainActive  bool                 `json:"keychain_active"`
 }
 
 type MailboxTestResult struct {
@@ -107,7 +111,11 @@ func (h *HarkService) emitUpdate() {
 		}
 	}
 	if win != nil {
-		_ = StateChanged.Emit(win, LiveSnapshot{Status: st, Stats: stats})
+		_ = StateChanged.Emit(win, LiveSnapshot{
+			Status:          st,
+			Stats:           stats,
+			AvailableUpdate: updater.AvailableVersion(),
+		})
 	}
 }
 
@@ -141,11 +149,13 @@ func (h *HarkService) Bootstrap() BootstrapPayload {
 		stats, _ = store.Stats()
 	}
 	return BootstrapPayload{
-		Config:         cfg,
-		Status:         eng.Status(),
-		Stats:          stats,
-		Presets:        asr.Presets(),
-		KeychainActive: keychain,
+		AppVersion:      mygo.App.Version(),
+		AvailableUpdate: updater.AvailableVersion(),
+		Config:          cfg,
+		Status:          eng.Status(),
+		Stats:           stats,
+		Presets:         asr.Presets(),
+		KeychainActive:  keychain,
 	}
 }
 
@@ -406,6 +416,10 @@ func (h *HarkService) RevealDatabase() {
 	mygo.Shell.ShowItemInFolder(store.DBPath())
 }
 
+func (h *HarkService) CheckForUpdates() {
+	updater.CheckForUpdates()
+}
+
 func (h *HarkService) OpenExternalDocs(docURL string) error {
 	return mygo.Shell.OpenExternal(docURL)
 }
@@ -433,6 +447,22 @@ func main() {
 		// 严禁静默回退临时目录（防消费信箱后临时目录被系统清理丢档）；保持 store=nil 阻断拉取并在界面报错
 		log.Printf("本地数据库无法打开 (%s): %v", cfg.DataDir, err)
 	}
+
+	mygo.Use(updater.Plugin)
+	mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
+		{Label: "Hark", Submenu: []*mygo.MenuItem{
+			{Role: mygo.RoleAbout},
+			updater.MenuItem(),
+			mygo.Separator(),
+			{Role: mygo.RoleHide},
+			{Role: mygo.RoleHideOthers},
+			{Role: mygo.RoleUnhide},
+			mygo.Separator(),
+			{Role: mygo.RoleQuit},
+		}},
+		{Role: mygo.RoleEditMenu},
+		{Role: mygo.RoleWindowMenu},
+	}))
 
 	svc := &HarkService{
 		cfgPath: cfgPath,
@@ -539,8 +569,12 @@ func main() {
 			{Label: "打开存档与控制台", Accelerator: "CmdOrCtrl+O", Click: func(*mygo.MenuItem, *mygo.Window) { createOrShowWindow() }},
 			pauseItem,
 			{Label: "打开本地存档目录", Click: func(*mygo.MenuItem, *mygo.Window) { svc.RevealDatabase() }},
+			updater.MenuItem(),
 			mygo.Separator(),
 			{Label: "退出 Hark", Role: mygo.RoleQuit},
+		})
+		updater.OnChange(func() {
+			svc.emitUpdate()
 		})
 		if tray, err := mygo.NewTray(mygo.TrayOptions{
 			ID:             "hark-status",

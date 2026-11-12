@@ -15,6 +15,10 @@ export default defineConfig({
   frontendDist: "dist",
   bindings: "src/mygo.ts",
   out: "build",
+  updates: {
+    publicKey: "AwQdrrkU9eg+bYFxwAk+NzbXmnrv/4iCJolX22VIXHo=",
+    github: "riggedlab/hark",
+  },
   macos: process.env.MACOS_SIGNING_IDENTITY
     ? {
         signingIdentity: process.env.MACOS_SIGNING_IDENTITY,

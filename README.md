@@ -48,10 +48,10 @@ hark/
 
 无需在本地配编译环境，直接前往 **[Releases](https://github.com/riggedlab/hark/releases)** 下载最新构建产物：
 
-- **macOS 桌面管理端**：`hark-*-macos-universal.dmg`（同时支持 Apple Silicon 与 Intel）
-- **Windows 桌面管理端**：`hark-setup-*-amd64.exe`
-- **Linux 桌面管理端**：`hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz`
-- **Android 手机端**：`hark-*-android-arm64.apk`
+- **macOS 桌面管理端（内置自动更新）**：`hark-*.dmg`（同时支持 Apple Silicon 与 Intel）
+- **Windows 桌面管理端（内置自动更新）**：`hark-setup-*-amd64.exe`
+- **Linux 桌面管理端（内置自动更新）**：`hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz`
+- **Android 手机端（内置版本检查，支持覆盖升级）**：`hark-*-android-arm64.apk`
 - **iOS 手机端**：待开发，后续版本补齐
 - **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:latest` 或 `hark-mailbox-linux-*` 单二进制
 - **无界面 Worker（NAS / 服务器）**：`hark-worker-*` 单二进制

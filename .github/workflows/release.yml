@@ -56,10 +56,10 @@ jobs:
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             notes="$(printf '%s\n' \
               '### 下载说明' \
-              '- **macOS 桌面端**：下载 `hark-*-macos-universal.dmg`（同时支持 Apple Silicon 与 Intel；若首次打开提示未公证，终端执行一次 `xattr -cr /Applications/Hark.app` 即可）。' \
-              '- **Windows 桌面端**：下载 `hark-setup-*-amd64.exe` 安装运行。' \
-              '- **Linux 桌面端**：下载对应架构 `.deb` 或 `.tar.gz`。' \
-              '- **Android 手机端**：下载 `hark-*-android-arm64.apk` 安装，在「设备状态 → 服务器设置」填入信箱与共享密钥。' \
+              '- **macOS 桌面端（含自动更新）**：下载 `hark-*.dmg`（同时支持 Apple Silicon 与 Intel；安装后支持后台自动检查与一键增量更新）。' \
+              '- **Windows 桌面端（含自动更新）**：下载 `hark-setup-*-amd64.exe` 安装运行。' \
+              '- **Linux 桌面端**：下载对应架构 `.deb`、`.rpm` 或 `.tar.gz`。' \
+              '- **Android 手机端**：下载 `hark-*-android-arm64.apk` 直接覆盖安装（支持应用内「设备状态 → 检查更新」）。' \
               '- **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:'"${{ steps.meta.outputs.version }}"'` 或直接下载 `hark-mailbox-linux-*` 单二进制。' \
               '- **NAS / 无界面 Worker**：下载 `hark-worker-*` 单二进制。' \
               '')"
@@ -136,26 +136,18 @@ jobs:
           echo "$WINDOWS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/code-signing.pfx"
           echo "WINDOWS_CERTIFICATE_FILE=$RUNNER_TEMP/code-signing.pfx" >> "$GITHUB_ENV"
 
-      - name: Build desktop packages
+      - name: Build, sign & upload desktop packages + auto-update manifests
         working-directory: desktop
         env:
-          MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: bun run build -- -platform "${{ matrix.platform }}"
-
-      - name: Collect & upload desktop installers
-        env:
           GH_TOKEN: ${{ github.token }}
-          VER: ${{ needs.prepare.outputs.version }}
+          MYGO_UPDATER_PRIVATE_KEY: ${{ secrets.MYGO_UPDATER_PRIVATE_KEY }}
+          MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          mkdir -p dist-upload
-          if [ "${{ matrix.name }}" = "macOS" ]; then
-            cp desktop/build/*/hark-*.dmg "dist-upload/hark-${VER}-macos-universal.dmg"
-          elif [ "${{ matrix.name }}" = "Windows" ]; then
-            cp desktop/build/*/*-setup-*.exe dist-upload/
-          else
-            cp desktop/build/*/*.deb desktop/build/*/*.tar.gz dist-upload/
+          if [ -z "$MYGO_UPDATER_PRIVATE_KEY" ]; then
+            echo "::error::Missing MYGO_UPDATER_PRIVATE_KEY secret for signing desktop auto-updates."
+            exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" dist-upload/* --clobber --repo "$GITHUB_REPOSITORY"
+          bun run build -- -platform "${{ matrix.platform }}" -upload
 
   android:
     needs: prepare
