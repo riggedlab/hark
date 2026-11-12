@@ -367,6 +367,14 @@ func (s *Store) Search(f ArchiveFilter) (SearchPage, error) {
 				it.MatchedSegments = append(it.MatchedSegments, seg)
 			}
 		}
+		if len(it.MatchedSegments) == 0 && q != "" {
+			for _, seg := range d.Segments {
+				if strings.Contains(strings.ToLower(seg.Text), q) ||
+					strings.Contains(strings.ToLower(seg.SpeakerLabel), q) || strings.Contains(strings.ToLower(seg.SpeakerID), q) {
+					it.MatchedSegments = append(it.MatchedSegments, seg)
+				}
+			}
+		}
 		if len(it.MatchedSegments) == 0 {
 			if d.Text != "" {
 				it.MatchedSegments = append(it.MatchedSegments, ResolvedSegment{

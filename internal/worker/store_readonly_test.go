@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riggedlab/hark/internal/asr"
 	"github.com/riggedlab/hark/internal/e2ee"
 	"github.com/riggedlab/hark/internal/protocol"
 )
@@ -389,3 +390,62 @@ func TestWorkerCLILegacyFlagsAndOnce(t *testing.T) {
 		t.Fatalf("data-dir override ignored: %v", err)
 	}
 }
+
+func TestSearchSessionWithCoSpeakerMatch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, err = store.AssignSpeakers(asr.Result{
+		EmbeddingModel: "test",
+		Segments:       []asr.Segment{{Text: "你好", Speaker: "s0"}, {Text: "接口改好了", Speaker: "s1"}},
+		Speakers: []asr.SpeakerEmbedding{
+			{Speaker: "s0", SpeechS: 15, Embedding: []float64{1, 0}},
+			{Speaker: "s1", SpeechS: 15, Embedding: []float64{0, 1}},
+		},
+	}, 0.60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ApplyPhoneRoster(map[string]protocol.PhoneSpeakerItem{
+		"spk_001": {Name: "老王"},
+		"spk_002": {Name: "小李"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s1, s2 := "spk_001", "spk_002"
+	today := time.Now().Format("20060102") + "-100000.opus"
+	if err := store.SaveTranscript(protocol.TranscriptPayload{
+		Name:      today,
+		StartedAt: time.Now().Format("2006-01-02") + "T10:00:00",
+		DurationS: 20,
+		SpeechS:   12,
+		Text:      "你好。接口改好了。",
+		Segments: []protocol.Segment{
+			{Start: 1, End: 3, Text: "你好", Speaker: &s1},
+			{Start: 4, End: 9, Text: "接口改好了", Speaker: &s2},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, exists, err := OpenReadOnlyStore(dir)
+	if err != nil || !exists {
+		t.Fatalf("open readonly: exists=%v err=%v", exists, err)
+	}
+	defer ro.Close()
+	page, err := ro.Search(ArchiveFilter{Query: "接口", SpeakerID: "老王", DateRange: "today"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || len(page.Items[0].MatchedSegments) != 1 {
+		t.Fatalf("unexpected search items: %+v", page)
+	}
+	got := page.Items[0].MatchedSegments[0]
+	if got.SpeakerID != "spk_002" || got.SpeakerLabel != "小李" || got.Start != 4 || got.Text != "接口改好了" {
+		t.Fatalf("expected real co-speaker matched segment, got %+v", got)
+	}
+}
+

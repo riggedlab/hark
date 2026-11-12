@@ -308,7 +308,15 @@ func segmentTime(seconds float64) string {
 func writePageSummary(w io.Writer, total, count, offset int) {
 	if total == 0 {
 		fmt.Fprintln(w, "当前筛选条件下无记录")
-	} else if total > count {
-		fmt.Fprintf(w, "共 %d 条，当前展示最近 %d 条（跳过 %d 条；--offset %d 查看下一页）\n", total, count, offset, offset+count)
+		return
+	}
+	if count == 0 {
+		fmt.Fprintf(w, "共 %d 条，当前偏移 --offset %d 已无更多记录\n", total, offset)
+		return
+	}
+	if offset+count < total {
+		fmt.Fprintf(w, "共 %d 条，当前展示第 %d–%d 条（--offset %d 查看下一页）\n", total, offset+1, offset+count, offset+count)
+	} else if offset > 0 {
+		fmt.Fprintf(w, "共 %d 条，当前展示第 %d–%d 条（已到末页）\n", total, offset+1, offset+count)
 	}
 }

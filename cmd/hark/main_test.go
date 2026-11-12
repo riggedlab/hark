@@ -117,9 +117,17 @@ func TestQueryCommandsAndInterspersedFlags(t *testing.T) {
 		t.Fatalf("status: code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
 	code, stdout, stderr = invoke("timeline", "--data-dir", dir, "--date", "all", "--limit", "2")
-	if code != 0 || stderr != "" || !strings.Contains(stdout, "共 3 条，当前展示最近 2 条") || !strings.Contains(stdout, "14:30:00 →") ||
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "共 3 条，当前展示第 1–2 条（--offset 2 查看下一页）") || !strings.Contains(stdout, "14:30:00 →") ||
 		!strings.Contains(stdout, "老王 (spk_001)") || !strings.Contains(stdout, names[0]) || strings.Index(stdout, names[1]) > strings.Index(stdout, names[0]) {
 		t.Fatalf("timeline text: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, stdout, stderr = invoke("timeline", "--data-dir", dir, "--date", "all", "--limit", "2", "--offset", "2")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "已到末页") || strings.Contains(stdout, "查看下一页") {
+		t.Fatalf("timeline last page text: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	code, stdout, stderr = invoke("timeline", "--data-dir", dir, "--date", "all", "--limit", "2", "--offset", "3")
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "已无更多记录") || strings.Contains(stdout, "查看下一页") {
+		t.Fatalf("timeline past-end text: code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
 	code, stdout, stderr = invoke("search", "接口", "--data-dir", dir)
 	if code != 0 || stderr != "" || !strings.Contains(stdout, names[0]) || !strings.Contains(stdout, "接口明天上线") || strings.Contains(stdout, "开场白") {
