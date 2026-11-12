@@ -1,10 +1,22 @@
 # ASR 语音转写接入与本地部署指南
 
-Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置了 **2 种标准语音转写协议**，不在主仓库捆绑特定 Python 环境或大模型权重。你可以按自己的硬件条件二选一：
+Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置了 **3 种语音转写接入方式**，不在主仓库捆绑特定 Python 环境或大模型权重：
 
 ---
 
-## 方式一：OpenAI 兼容接口（零运维，填 Key 即用）
+## 方式一：火山引擎 · 豆包语音大模型极速版（国内云端首选）
+
+对接豆包语音 `POST https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash` 同步接口，**直接将内存解密后的 Ogg Opus 编码发送，无需中转任何公网对象存储（OSS/TOS）**，一次请求返回标点顺滑后的全文、分句时间戳与单文件内说话人分离。
+
+1. 打开火山引擎 **[豆包语音控制台](https://console.volcengine.com/speech/new/setting/activate)**，在「开通管理」中开通 **大模型录音文件极速版**（对应资源 ID：`volc.bigasr.auc_turbo`）。
+2. 在「API Key 管理」中创建一把 API Key（*注意：豆包语音的 API Key 与火山方舟 Ark 大模型的 Key 不通用*）。
+3. 在 Hark 桌面端「ASR 接入」切到 **「豆包大模型」**，填入 API Key 点 **「测试连接」** 即可验证。
+
+> **单段分人说明**：豆包极速版支持把同一段 5 分钟录音里的不同对话人切分开（手机端显示为「其他人 1 / 其他人 2」，电脑端显示为「对话人 1 / 对话人 2」）；如需跨天、跨录音自动认出固定熟人（如「老王」），请使用下方的本地声纹接口。
+
+---
+
+## 方式二：OpenAI 兼容接口（通用三方 API，填 Key 即用）
 
 支持所有兼容 `POST {BaseURL}/v1/audio/transcriptions` 的云端或本地服务。Hark 会自动把 `.opus` 封装重命名为 `.ogg` 上传，并在模型不支持 `verbose_json` 时自动回退为 `json`、从本地 Ogg 页尾计算精确时长。
 
@@ -20,7 +32,7 @@ Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置�
 
 ---
 
-## 方式二：Hark 本地增强接口（带声纹跨录音认人）
+## 方式三：Hark 本地增强接口（带声纹跨录音认人）
 
 如果你希望在 Mac / 本地工作站离线转写，并自动区分「谁说了哪句话」、在手机端给人物改名与合并，可以自建一个最小 HTTP 服务，在 Hark 桌面端选择 **「Hark 增强接口 (声纹)」** 并填入地址（如 `http://127.0.0.1:8765`）。
 

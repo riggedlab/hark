@@ -183,10 +183,22 @@ func (s *Store) ExportMacRoster() (protocol.MacSpeakerRoster, error) {
 }
 
 // AssignSpeakers 将单段音频内的局部说话人映射为全局 spk_xxx 或局部 other_N。
-// 当 ASR 不返回声纹（如第三方 OpenAI 接口）时优雅降级，返回空映射。
+// 当云端 ASR（如豆包语音）只返回单文件内说话人分离标签、不返回声纹向量时，自动映射为单段局部 other_1/other_2…（不污染全局声纹库）。
 func (s *Store) AssignSpeakers(res asr.Result, threshold float64) (map[string]string, error) {
 	if len(res.Speakers) == 0 {
-		return map[string]string{}, nil
+		localOnly := map[string]string{}
+		idx := 0
+		for _, seg := range res.Segments {
+			raw := strings.TrimSpace(string(seg.Speaker))
+			if raw == "" || strings.TrimSpace(seg.Text) == "" {
+				continue
+			}
+			if _, exists := localOnly[raw]; !exists {
+				idx++
+				localOnly[raw] = fmt.Sprintf("other_%d", idx)
+			}
+		}
+		return localOnly, nil
 	}
 	if threshold <= 0 || threshold >= 1 {
 		threshold = 0.60

@@ -50,10 +50,12 @@ export interface ArchiveStats {
 }
 
 export interface AsrConfig {
-  /** "openai" | "hark_http" | "mock" */
+  /** "volcengine" | "openai" | "hark_http" | "mock" */
   provider: string;
   base_url: string;
   api_key?: string;
+  /** 火山旧版控制台可选 AppID；新版控制台单 APIKey 留空即可 */
+  app_id?: string;
   model: string;
   language: string;
 }
@@ -115,6 +117,7 @@ export interface ProbeReport {
   has_timestamps: boolean;
   segment_count: number;
   has_speakers: boolean;
+  has_diarization_only: boolean;
   speaker_count: number;
   embedding_dim: number;
   error?: string;

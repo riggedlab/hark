@@ -26,6 +26,7 @@ interface UIState {
   presets: Preset[];
   providerUrls: Record<string, string>;
   providerModels: Record<string, string>;
+  providerKeys: Record<string, string>;
   draftRev: number;
 
   filter: ArchiveFilter;
@@ -58,13 +59,16 @@ const state: UIState = {
   stats: null,
   presets: [],
   providerUrls: {
+    volcengine: "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
     openai: "https://api.siliconflow.cn/v1",
     hark_http: "http://127.0.0.1:8765",
   },
   providerModels: {
+    volcengine: "volc.bigasr.auc_turbo",
     openai: "FunAudioLLM/SenseVoiceSmall",
     hark_http: "",
   },
+  providerKeys: {},
   draftRev: 0,
 
   filter: { query: "", date_range: "all", speaker_id: "", limit: 150, offset: 0 },
@@ -158,6 +162,7 @@ function fmtMMSS(sec: number): string {
 }
 
 function humanProvider(p: string): string {
+  if (p === "volcengine") return "豆包大模型";
   if (p === "hark_http") return "本地声纹";
   if (p === "mock") return "内置模拟";
   return "云端 API";
@@ -256,6 +261,9 @@ async function saveDraft(silent = false) {
       state.providerUrls[boot.config.asr.provider] = boot.config.asr.base_url;
     }
     state.providerModels[boot.config.asr.provider] = boot.config.asr.model || "";
+    if (boot.config.asr.api_key) {
+      state.providerKeys[boot.config.asr.provider] = boot.config.asr.api_key;
+    }
     // 仅当保存期间用户没有继续修改表单时才用回包覆盖草稿
     if (state.draftRev === revAtStart) {
       state.draft = cloneConfig(boot.config);
@@ -278,7 +286,13 @@ function renderSidebar(): string {
   const recCount = state.stats?.total_recordings ?? 0;
   const speechDur = fmtDuration(state.stats?.total_speech_s ?? 0);
   const activeProv =
-    state.config?.asr.provider === "hark_http" ? "声纹" : state.config?.asr.provider === "mock" ? "模拟" : "API";
+    state.config?.asr.provider === "volcengine"
+      ? "豆包"
+      : state.config?.asr.provider === "hark_http"
+        ? "声纹"
+        : state.config?.asr.provider === "mock"
+          ? "模拟"
+          : "API";
 
   return `
     <aside class="sidebar">
@@ -338,7 +352,7 @@ function renderArchiveWorkspace(): string {
     const badges = (it.speakers || [])
       .slice(0, 3)
       .map((sp) => {
-        const isNamed = !sp.label.startsWith("说话人 ") && !sp.label.startsWith("路人 ");
+        const isNamed = !sp.label.startsWith("说话人 ") && !sp.label.startsWith("对话人 ");
         return `<span class="spk-pill ${isNamed ? "named" : ""}">${escapeHTML(sp.label)}</span>`;
       })
       .join("");
@@ -526,7 +540,31 @@ function renderASRWorkspace(): string {
   const metrics = state.stats?.asr;
 
   let formFields = "";
-  if (prov === "openai") {
+  if (prov === "volcengine") {
+    formFields = `
+      <div class="field">
+        <label class="field-label" for="volc-key">
+          <span>豆包语音 API Key</span>
+          ${state.keychainActive ? `<span style="font-weight:400;color:var(--text-muted);">系统钥匙串保护</span>` : `<span style="font-weight:400;color:var(--text-muted);">在「豆包语音控制台 → API Key 管理」创建（与火山方舟 Key 不通用）</span>`}
+        </label>
+        <div class="input-group">
+          <input id="volc-key" type="${state.showSecrets ? "text" : "password"}" class="mono" placeholder="填入豆包语音 API Key（旧版控制台填 Access Token）" value="${escapeHTML(d.asr.api_key || "")}" data-field="asr.api_key" />
+          <button class="btn" data-action="toggle-secrets">${state.showSecrets ? "隐藏" : "显示"}</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label class="field-label" for="volc-res"><span>资源 ID（需在控制台开通极速版）</span></label>
+          <input id="volc-res" type="text" class="mono" placeholder="volc.bigasr.auc_turbo" value="${escapeHTML(d.asr.model || "volc.bigasr.auc_turbo")}" data-field="asr.model" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="volc-appid"><span>旧版 App ID（新版留空）</span></label>
+          <input id="volc-appid" type="text" class="mono" placeholder="新版单 Key 留空" value="${escapeHTML(d.asr.app_id || "")}" data-field="asr.app_id" />
+        </div>
+      </div>
+      <p class="note-line">同步直传内存中的 Ogg Opus 音频，无需中转对象存储；自带标点顺滑、精确分句时间戳与单段内说话人分离。</p>
+    `;
+  } else if (prov === "openai") {
     const chips = state.presets
       .filter((p) => p.provider === "openai")
       .map((p) => {
@@ -596,12 +634,17 @@ function renderASRWorkspace(): string {
     if (!r.ok) {
       probeHTML = `<div class="probe-box err">测试未通过（${r.latency_ms} ms）：${escapeHTML(r.error || "未知错误")}</div>`;
     } else {
+      const spkText = !r.has_speakers
+        ? "无声纹（纯文本模式）"
+        : r.has_diarization_only
+          ? `单段分人 (检出 ${r.speaker_count} 人)`
+          : `跨录音声纹 (检出 ${r.speaker_count} 人)`;
       probeHTML = `
         <div class="probe-box ok">
           <div class="cap-grid">
             <span class="cap-tag good">连通正常 · ${r.latency_ms} ms</span>
             <span class="cap-tag ${r.has_timestamps ? "good" : ""}">时间戳：${r.has_timestamps ? `支持 (${r.segment_count} 段)` : "仅整段文本"}</span>
-            <span class="cap-tag ${r.has_speakers ? "good" : ""}">区分说话人：${r.has_speakers ? `支持 (检出 ${r.speaker_count} 人)` : "无声纹（纯文本模式）"}</span>
+            <span class="cap-tag ${r.has_speakers ? "good" : ""}">区分说话人：${spkText}</span>
           </div>
           <div style="font-size:var(--fs-meta);color:var(--text-secondary);">测试结果：「${escapeHTML(r.text || "空")}」</div>
         </div>
@@ -623,8 +666,9 @@ function renderASRWorkspace(): string {
           <div class="panel-head">
             <h3 class="panel-title">接入协议</h3>
             <div class="seg-group" role="group" aria-label="ASR 协议类型">
-              <button class="seg-btn ${prov === "openai" ? "active" : ""}" data-provider="openai">OpenAI 兼容接口</button>
-              <button class="seg-btn ${prov === "hark_http" ? "active" : ""}" data-provider="hark_http">Hark 增强接口 (声纹)</button>
+              <button class="seg-btn ${prov === "volcengine" ? "active" : ""}" data-provider="volcengine">豆包大模型</button>
+              <button class="seg-btn ${prov === "openai" ? "active" : ""}" data-provider="openai">OpenAI 兼容</button>
+              <button class="seg-btn ${prov === "hark_http" ? "active" : ""}" data-provider="hark_http">Hark 本地声纹</button>
               <button class="seg-btn ${prov === "mock" ? "active" : ""}" data-provider="mock">内置模拟</button>
             </div>
           </div>
@@ -837,14 +881,22 @@ function bindGlobalListeners() {
         state.providerUrls[prev] = state.draft.asr.base_url;
       }
       state.providerModels[prev] = state.draft.asr.model || "";
+      state.providerKeys[prev] = state.draft.asr.api_key || "";
       const p = btn.dataset.provider;
       state.draft.asr.provider = p;
-      if (p === "hark_http") {
+      if (p === "volcengine") {
+        state.draft.asr.base_url =
+          state.providerUrls.volcengine || "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash";
+        state.draft.asr.model = state.providerModels.volcengine || "volc.bigasr.auc_turbo";
+        state.draft.asr.api_key = state.providerKeys.volcengine || "";
+      } else if (p === "hark_http") {
         state.draft.asr.base_url = state.providerUrls.hark_http || "http://127.0.0.1:8765";
         state.draft.asr.model = state.providerModels.hark_http || "";
+        state.draft.asr.api_key = state.providerKeys.hark_http || "";
       } else if (p === "openai") {
         state.draft.asr.base_url = state.providerUrls.openai || "https://api.siliconflow.cn/v1";
         state.draft.asr.model = state.providerModels.openai || "FunAudioLLM/SenseVoiceSmall";
+        state.draft.asr.api_key = state.providerKeys.openai || "";
       }
       state.draftRev++;
       state.dirty = true;
@@ -1025,7 +1077,10 @@ function bindGlobalListeners() {
         state.draft.asr.model = el.value;
         state.providerModels[state.draft.asr.provider] = el.value;
       } else if (field === "asr.language") state.draft.asr.language = el.value;
-      else if (field === "asr.api_key") state.draft.asr.api_key = el.value;
+      else if (field === "asr.api_key") {
+        state.draft.asr.api_key = el.value;
+        state.providerKeys[state.draft.asr.provider] = el.value;
+      } else if (field === "asr.app_id") state.draft.asr.app_id = el.value;
       else if (field === "speaker_threshold") state.draft.speaker_threshold = Number(el.value) || 0.6;
       else if (field === "server_url") state.draft.server_url = el.value;
       else if (field === "worker_token") state.draft.worker_token = el.value;
@@ -1079,6 +1134,9 @@ async function init() {
     state.providerUrls[boot.config.asr.provider] = boot.config.asr.base_url;
   }
   state.providerModels[boot.config.asr.provider] = boot.config.asr.model || "";
+  if (boot.config.asr.api_key) {
+    state.providerKeys[boot.config.asr.provider] = boot.config.asr.api_key;
+  }
   state.status = boot.status;
   state.stats = boot.stats;
   state.presets = boot.presets || [];

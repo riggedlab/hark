@@ -292,7 +292,7 @@ func formatDefaultSpeakerLabel(sid string) string {
 		return "说话人 " + strings.TrimPrefix(sid, "spk_")
 	}
 	if strings.HasPrefix(sid, "other_") {
-		return "路人 " + strings.TrimPrefix(sid, "other_")
+		return "对话人 " + strings.TrimPrefix(sid, "other_")
 	}
 	return sid
 }

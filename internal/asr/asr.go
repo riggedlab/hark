@@ -21,15 +21,17 @@ import (
 var probeAudio []byte
 
 const (
-	ProviderOpenAI   = "openai"
-	ProviderHarkHTTP = "hark_http"
-	ProviderMock     = "mock"
+	ProviderVolcengine = "volcengine"
+	ProviderOpenAI     = "openai"
+	ProviderHarkHTTP   = "hark_http"
+	ProviderMock       = "mock"
 )
 
 type Config struct {
-	Provider string `json:"provider"` // "openai" | "hark_http" | "mock"
+	Provider string `json:"provider"` // "volcengine" | "openai" | "hark_http" | "mock"
 	BaseURL  string `json:"base_url"`
 	APIKey   string `json:"api_key,omitempty"`
+	AppID    string `json:"app_id,omitempty"` // 火山旧版控制台可选 AppID；新版控制台单 APIKey 留空即可
 	Model    string `json:"model"`
 	Language string `json:"language"`
 }
@@ -101,24 +103,27 @@ type Result struct {
 }
 
 type ProbeReport struct {
-	OK             bool    `json:"ok"`
-	LatencyMs      int64   `json:"latency_ms"`
-	Engine         string  `json:"engine"`
-	Model          string  `json:"model"`
-	EmbeddingModel string  `json:"embedding_model,omitempty"`
-	DurationS      float64 `json:"duration_s"`
-	Text           string  `json:"text"`
-	HasTimestamps  bool    `json:"has_timestamps"`
-	SegmentCount   int     `json:"segment_count"`
-	HasSpeakers    bool    `json:"has_speakers"`
-	SpeakerCount   int     `json:"speaker_count"`
-	EmbeddingDim   int     `json:"embedding_dim"`
-	Error          string  `json:"error,omitempty"`
+	OK                 bool    `json:"ok"`
+	LatencyMs          int64   `json:"latency_ms"`
+	Engine             string  `json:"engine"`
+	Model              string  `json:"model"`
+	EmbeddingModel     string  `json:"embedding_model,omitempty"`
+	DurationS          float64 `json:"duration_s"`
+	Text               string  `json:"text"`
+	HasTimestamps      bool    `json:"has_timestamps"`
+	SegmentCount       int     `json:"segment_count"`
+	HasSpeakers        bool    `json:"has_speakers"`
+	HasDiarizationOnly bool    `json:"has_diarization_only"`
+	SpeakerCount       int     `json:"speaker_count"`
+	EmbeddingDim       int     `json:"embedding_dim"`
+	Error              string  `json:"error,omitempty"`
 }
 
 func NormalizeConfig(c Config) Config {
 	c.Provider = strings.ToLower(strings.TrimSpace(c.Provider))
 	switch c.Provider {
+	case "doubao", "volc":
+		c.Provider = ProviderVolcengine
 	case "custom_http", "hark", "":
 		if c.Provider == "" && strings.Contains(c.BaseURL, "/v1") {
 			c.Provider = ProviderOpenAI
@@ -130,8 +135,17 @@ func NormalizeConfig(c Config) Config {
 	}
 	c.BaseURL = strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	c.APIKey = strings.TrimSpace(c.APIKey)
+	c.AppID = strings.TrimSpace(c.AppID)
 	c.Model = strings.TrimSpace(c.Model)
 	c.Language = strings.TrimSpace(c.Language)
+	if c.Provider == ProviderVolcengine {
+		if c.BaseURL == "" {
+			c.BaseURL = DefaultVolcFlashURL
+		}
+		if c.Model == "" {
+			c.Model = DefaultVolcResourceID
+		}
+	}
 	return c
 }
 
@@ -139,6 +153,11 @@ func ValidateConfig(c Config) error {
 	c = NormalizeConfig(c)
 	switch c.Provider {
 	case ProviderMock:
+		return nil
+	case ProviderVolcengine:
+		if c.APIKey == "" {
+			return errors.New("请填写豆包语音控制台签发的 API Key")
+		}
 		return nil
 	case ProviderOpenAI:
 		if c.BaseURL == "" {
@@ -167,6 +186,9 @@ func CheckHealth(ctx context.Context, cfg Config) (bool, *string) {
 	switch cfg.Provider {
 	case ProviderMock:
 		m := "mock-v1"
+		return true, &m
+	case ProviderVolcengine:
+		m := "豆包大模型 (" + cfg.Model + ")"
 		return true, &m
 	case ProviderOpenAI:
 		m := cfg.Model
@@ -225,6 +247,8 @@ func Transcribe(ctx context.Context, cfg Config, opus []byte, name string) (Resu
 			Model:     "mock-v1",
 			Segments:  []Segment{{Start: 0, End: dur, Text: txt}},
 		}, nil
+	case ProviderVolcengine:
+		return transcribeVolcengine(ctx, cfg, opus)
 	case ProviderOpenAI:
 		return transcribeOpenAI(ctx, cfg, opus, name)
 	case ProviderHarkHTTP:
@@ -269,19 +293,33 @@ func Probe(ctx context.Context, cfg Config) ProbeReport {
 			}
 		}
 	}
+	diarizationOnly := false
+	if validSpk == 0 {
+		segSpks := map[string]bool{}
+		for _, s := range res.Segments {
+			if sp := strings.TrimSpace(string(s.Speaker)); sp != "" {
+				segSpks[sp] = true
+			}
+		}
+		if len(segSpks) > 0 {
+			validSpk = len(segSpks)
+			diarizationOnly = true
+		}
+	}
 	return ProbeReport{
-		OK:             true,
-		LatencyMs:      lat,
-		Engine:         res.Engine,
-		Model:          res.Model,
-		EmbeddingModel: res.EmbeddingModel,
-		DurationS:      res.DurationS,
-		Text:           res.Text,
-		HasTimestamps:  hasTS,
-		SegmentCount:   len(res.Segments),
-		HasSpeakers:    validSpk > 0,
-		SpeakerCount:   validSpk,
-		EmbeddingDim:   embDim,
+		OK:                 true,
+		LatencyMs:          lat,
+		Engine:             res.Engine,
+		Model:              res.Model,
+		EmbeddingModel:     res.EmbeddingModel,
+		DurationS:          res.DurationS,
+		Text:               res.Text,
+		HasTimestamps:      hasTS,
+		SegmentCount:       len(res.Segments),
+		HasSpeakers:        validSpk > 0,
+		HasDiarizationOnly: diarizationOnly,
+		SpeakerCount:       validSpk,
+		EmbeddingDim:       embDim,
 	}
 }
 

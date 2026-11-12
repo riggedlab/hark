@@ -86,10 +86,10 @@ func DefaultConfig() Config {
 // ValidateReady 检查配置是否足以开始拉取信箱。
 func (c Config) ValidateReady() ([]byte, error) {
 	if strings.TrimSpace(c.ServerURL) == "" {
-		return nil, errors.New("未填写盲信箱地址 (SERVER_URL)")
+		return nil, errors.New("未填写盲信箱地址")
 	}
 	if strings.TrimSpace(c.WorkerToken) == "" {
-		return nil, errors.New("未填写拉取端令牌 (WORKER_TOKEN)")
+		return nil, errors.New("未填写电脑端连接令牌")
 	}
 	key, err := e2ee.DecodeKey(c.E2EEKey)
 	if err != nil {
@@ -264,6 +264,9 @@ func parseLegacyEnv(content string, cfg *Config) {
 	}
 	if v := kv["ASR_API_KEY"]; v != "" {
 		cfg.ASR.APIKey = v
+	}
+	if v := kv["ASR_APP_ID"]; v != "" {
+		cfg.ASR.AppID = v
 	}
 	if v := kv["ASR_MODEL"]; v != "" {
 		cfg.ASR.Model = v

@@ -99,3 +99,63 @@ func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
+
+func TestVolcengineFlashAdapterDiarizationFallbackAndSilence(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("X-Api-Key") != "volc-test-key" {
+			t.Fatalf("expected X-Api-Key header, got %q", r.Header.Get("X-Api-Key"))
+		}
+		if r.Header.Get("X-Api-Resource-Id") != DefaultVolcResourceID {
+			t.Fatalf("unexpected resource id: %q", r.Header.Get("X-Api-Resource-Id"))
+		}
+		var body struct {
+			Audio   map[string]any `json:"audio"`
+			Request map[string]any `json:"request"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Audio["format"] != "ogg" || body.Audio["codec"] != "opus" {
+			t.Fatalf("unexpected audio meta: %+v", body.Audio)
+		}
+
+		// 第 1 次模拟返回带双说话人标签的完整 utterances
+		if calls == 1 {
+			w.Header().Set("X-Api-Status-Code", "20000000")
+			w.Header().Set("X-Api-Message", "OK")
+			_, _ = w.Write([]byte(`{
+				"audio_info": {"duration": 3450},
+				"result": {
+					"text": "你好，收到。",
+					"utterances": [
+						{"start_time": 0, "end_time": 1650, "text": "你好，", "additions": {"speaker_id": 1}},
+						{"start_time": 1850, "end_time": 3400, "text": "收到。", "additions": {"speaker_id": 2}}
+					]
+				}
+			}`))
+			return
+		}
+		// 第 2 次模拟静音音频 20000003
+		w.Header().Set("X-Api-Status-Code", "20000003")
+		w.Header().Set("X-Api-Message", "Silent audio")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		Provider: ProviderVolcengine,
+		BaseURL:  srv.URL,
+		APIKey:   "volc-test-key",
+	}
+	rep := Probe(context.Background(), cfg)
+	if !rep.OK || !rep.HasTimestamps || !rep.HasSpeakers || !rep.HasDiarizationOnly || rep.SpeakerCount != 2 {
+		t.Fatalf("unexpected Volcengine ProbeReport: %+v", rep)
+	}
+
+	silentRes, err := Transcribe(context.Background(), cfg, probeAudio, "20261112-120000.opus")
+	if err != nil || silentRes.Text != "" || len(silentRes.Segments) != 0 {
+		t.Fatalf("expected silent 20000003 to return empty result without error, got %+v err=%v", silentRes, err)
+	}
+}
