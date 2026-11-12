@@ -482,6 +482,9 @@ func (e *Engine) pollAndProcessBatch(ctx context.Context, cfg Config, key []byte
 		return ver, false, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return ver, false, errors.New("信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return ver, false, fmt.Errorf("拉取队列返回 HTTP %d", resp.StatusCode)
 	}
@@ -668,6 +671,9 @@ func (e *Engine) syncPhoneSpeakers(ctx context.Context, cfg Config, key []byte, 
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNoContent {
 		return nil
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return errors.New("信箱返回 HTTP 404（云端仍是旧版 v1 容器，请升级为 v2 hark-mailbox）")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("读取 speakers_phone 返回 HTTP %d", resp.StatusCode)

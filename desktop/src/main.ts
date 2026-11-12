@@ -707,6 +707,8 @@ function renderSystemWorkspace(): string {
     mbHTML = r.ok
       ? `<div class="probe-box ok"><div class="cap-grid"><span class="cap-tag good">信箱连通且令牌有效 · ${r.latency_ms} ms</span></div><div style="font-size:var(--fs-meta);color:var(--text-secondary);">共享密钥不发往服务器，将在手机上传录音时端到端核验。</div></div>`
       : `<div class="probe-box err">信箱连接失败：${escapeHTML(r.error || "")}</div>`;
+  } else if (state.status?.phase === "error" && state.status.last_error) {
+    mbHTML = `<div class="probe-box err">当前同步受阻原因：${escapeHTML(state.status.last_error)}</div>`;
   }
 
   const dirtyText = state.dirty ? "有未保存的修改" : "已生效";
@@ -744,6 +746,16 @@ function renderSystemWorkspace(): string {
               <input id="mb-key" type="${state.showSecrets ? "text" : "password"}" class="mono" placeholder="32 字节 Base64 或 64 位 hex" value="${escapeHTML(d.e2ee_key || "")}" data-field="e2ee_key" />
               <button class="btn" data-action="gen-key">生成新密钥</button>
               <button class="btn" data-action="copy-key">复制</button>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="mb-ca">
+              <span>自签证书路径（可选）</span>
+              <span style="font-weight:400;color:var(--text-muted);">公网 HTTPS 域名留空；IP 自签证书可选择 .pem 文件</span>
+            </label>
+            <div class="input-group">
+              <input id="mb-ca" type="text" class="mono" placeholder="公网正规证书留空" value="${escapeHTML(d.server_ca || "")}" data-field="server_ca" />
+              <button class="btn" data-action="pick-ca">选择证书…</button>
             </div>
           </div>
           ${mbHTML}
@@ -1036,6 +1048,17 @@ function bindGlobalListeners() {
         await Hark.revealDatabase();
         break;
       }
+      case "pick-ca": {
+        if (!state.draft) break;
+        const chosen = await Hark.pickCAFile();
+        if (chosen) {
+          state.draft.server_ca = chosen;
+          state.draftRev++;
+          state.dirty = true;
+          render();
+        }
+        break;
+      }
       case "backup-db": {
         const dest = await Hark.backupDatabase();
         if (dest) showToast(`数据库已在线备份至 ${dest}`);
@@ -1085,6 +1108,7 @@ function bindGlobalListeners() {
       else if (field === "server_url") state.draft.server_url = el.value;
       else if (field === "worker_token") state.draft.worker_token = el.value;
       else if (field === "e2ee_key") state.draft.e2ee_key = el.value;
+      else if (field === "server_ca") state.draft.server_ca = el.value;
       else if (field === "data_dir") state.draft.data_dir = el.value;
       state.draftRev++;
       state.dirty = true;

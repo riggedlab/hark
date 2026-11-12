@@ -386,6 +386,18 @@ func (h *HarkService) BackupDatabase(ctx context.Context) (string, error) {
 	return dest, nil
 }
 
+func (h *HarkService) PickCAFile(ctx context.Context) (string, error) {
+	files, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Parent:  mygo.CallerWindow(ctx),
+		Title:   "选择服务端自签证书 (.pem / .crt)",
+		Filters: []mygo.FileFilter{{Name: "PEM Certificate", Extensions: []string{"pem", "crt", "cer"}}},
+	})
+	if err != nil || len(files) == 0 {
+		return "", err
+	}
+	return files[0], nil
+}
+
 func (h *HarkService) RevealDatabase() {
 	store, err := h.requireStore()
 	if err != nil {

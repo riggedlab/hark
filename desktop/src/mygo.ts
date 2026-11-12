@@ -194,6 +194,9 @@ export const Hark = {
   openExternalDocs(docURL: string): Promise<void> {
     return call("Hark.OpenExternalDocs", docURL);
   },
+  pickCAFile(): Promise<string> {
+    return call("Hark.PickCAFile");
+  },
   probeASR(candidate: AsrConfig): Promise<ProbeReport> {
     return call("Hark.ProbeASR", candidate);
   },
