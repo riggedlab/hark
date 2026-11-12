@@ -1,7 +1,7 @@
 # Hark · 谛听
 
 > **Hark (Model `DT-1`)** is an open-source, all-day wearable voice sensor by **RiggedLab** that captures spoken life and turns it into private, structured context for AI models — featuring BLE encrypted audio streaming, a pure-Go zero-knowledge E2EE mailbox (`/v2`), and a native Go + MyGo desktop archive & ASR console.  
-> *Note: Documentation and UI are Chinese-first during the current open alpha test.*
+> *Note: Documentation and UI are Chinese-first during the current open alpha test. Android is supported now; the native iOS client is planned and will be added in an upcoming release.*
 
 ---
 
@@ -12,7 +12,7 @@
 ## 系统架构
 
 ```text
-Hark DT-1 佩戴端 ──BLE 加密/Opus──▶ 安卓手机 ──AES-256-GCM (/v2)──▶ 盲信箱 (Go) ◀──长轮询── 桌面管理端 (MyGo) / CLI Worker ──▶ 可插拔 ASR
+Hark DT-1 佩戴端 ──BLE 加密/Opus──▶ 手机端 (Android / iOS 待开发) ──AES-256-GCM (/v2)──▶ 盲信箱 (Go) ◀──长轮询── 桌面管理端 (MyGo) / CLI Worker ──▶ 可插拔 ASR
 ```
 
 ```text
@@ -20,6 +20,7 @@ hark/
 ├── firmware/            # 随身设备固件 (C / Zephyr，蓝牙广播名 Hark DT-1)
 ├── enclosure/           # 3D 打印外壳模型（开发板验证版 STL）
 ├── android/             # 安卓原生 App (Kotlin / Compose，包名 io.github.riggedlab.hark)
+├── ios/                 # (待开发) iOS 原生 App，后续补入
 ├── server/              # 云端盲信箱 (纯 Go 标准库，零外部依赖，<15MB 镜像)
 ├── desktop/             # 电脑管理端 (Go + MyGo + Bun：菜单栏常驻 + 语音存档检索导出 + ASR 接入测活)
 ├── cmd/hark-worker/     # 无界面命令行版 (单二进制，给 NAS / Linux 服务器常驻运行)
@@ -51,6 +52,7 @@ hark/
 - **Windows 桌面管理端**：`hark-setup-*-amd64.exe`
 - **Linux 桌面管理端**：`hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz`
 - **Android 手机端**：`hark-*-android-arm64.apk`
+- **iOS 手机端**：待开发，后续版本补齐
 - **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:latest` 或 `hark-mailbox-linux-*` 单二进制
 - **无界面 Worker（NAS / 服务器）**：`hark-worker-*` 单二进制
 
@@ -129,6 +131,15 @@ git commit -m "chore(release): v0.1.0"
 git tag v0.1.0
 git push origin main v0.1.0
 ```
+
+## 当前进度与后续计划
+
+- [x] 随身固件 v1：16kHz PDM → 80Hz 高通 + 自动增益 → Opus → BLE 加密传输与静音跳帧
+- [x] Android 客户端：蓝牙配对重连、端侧 Silero VAD、波形回放、事件/人物/地点时间线
+- [x] 纯 Go `/v2` 端到端加密盲信箱 + MyGo 跨平台桌面存档管理端 + 双协议可插拔 ASR 测活
+- [ ] **iOS 原生客户端**（待开发：BLE 后台长连、端侧 VAD 与 `/v2` 端到端加密同步，复用同一套硬件与信箱协议）
+- [ ] 蓝牙断连时设备端 Flash 离线补录缓存
+- [ ] 自制超薄 PCB v1 与正式版外壳
 
 ## 第三方代码与许可证
 
