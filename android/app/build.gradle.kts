@@ -67,6 +67,9 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/probeAssets"))
 }
 
@@ -97,4 +100,8 @@ dependencies {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
+    testImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation("org.robolectric:robolectric:4.14.1")
 }
