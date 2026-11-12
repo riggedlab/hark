@@ -1,0 +1,33 @@
+/* 电池电压：ADC 通道 7 (P1.14)，经过 1/2 分压；vbat_pwr 负载开关控制分压电路的通断 */
+/ {
+	chosen {
+		zephyr,code-partition = &recorder_partition;
+		zephyr,settings-partition = &storage_partition;
+	};
+	zephyr,user {
+		io-channels = <&adc 7>;
+	};
+};
+
+/* 裸机程序仍从 0 启动。沿用 SDK 的 0x174000..0x17cfff settings 区，
+ * 链接器限制程序不能进入该区，HEX 也不会包含该区。没有 MCUboot/双槽升级。 */
+/delete-node/ &boot_partition;
+/delete-node/ &slot0_partition;
+/delete-node/ &slot1_partition;
+
+&cpuapp_rram {
+	partitions {
+		recorder_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
+			label = "recorder";
+			reg = <0x0 0x174000>;
+		};
+	};
+};
+
+/* PDM 驱动的接收队列默认只有 4 块 (80ms)。开口时要一口气编码 0.4 秒缓存（约 100ms），
+ * 队列一满驱动就停麦且不恢复（2026-11-11 实测每几分钟一次）。40 块 = 0.8 秒，
+ * 驱动另占 2 块，所以 audio.c 的 BLOCK_COUNT 必须 ≥ 42。 */
+&dmic_dev {
+	queue-size = <40>;
+};

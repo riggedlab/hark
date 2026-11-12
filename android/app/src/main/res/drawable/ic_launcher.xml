@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 临时图标：一只耳朵形状的圆 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#1F2A44" android:pathData="M0,0h108v108h-108z" />
+    <path android:fillColor="#E8C26A"
+        android:pathData="M54,26a22,22 0,0 1,22 22c0,9 -5,13 -9,17c-3,3 -4,6 -4,10a9,9 0,0 1,-18 0h6a3,3 0,0 0,6 0c0,-6 2,-10 6,-14c4,-4 7,-7 7,-13a16,16 0,0 0,-32 0h-6a22,22 0,0 1,22 -22z" />
+</vector>

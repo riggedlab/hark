@@ -1,0 +1,17 @@
+# Hark 盲信箱中转服务（纯 Go 标准库，镜像 <15MB）。默认只监听宿主机 127.0.0.1:8000，由 Caddy / Nginx / Tailscale 反向代理提供 HTTPS。
+name: mailbox
+services:
+  mailbox:
+    image: ${MAILBOX_IMAGE:-ghcr.io/riggedlab/hark-mailbox:latest}
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8000}:8000"
+    volumes:
+      - mailbox-data:/data
+
+volumes:
+  mailbox-data:

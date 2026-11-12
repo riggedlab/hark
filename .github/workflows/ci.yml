@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  go-and-desktop:
+    name: Audit, Go & Desktop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Open-source privacy & security audit
+        run: python3 tools/oss_audit.py --strict-git
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests (pure Go & race detector)
+        run: |
+          CGO_ENABLED=0 go test ./...
+          go test -race ./internal/... ./server
+
+      - name: Build server & headless worker binaries
+        run: |
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark-mailbox ./server
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/hark-worker ./cmd/hark-worker
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Check desktop bindings & frontend build
+        working-directory: desktop
+        run: |
+          bun install --frozen-lockfile
+          bun run generate
+          git diff --exit-code src/mygo.ts
+          bun run build:web
+
+  android:
+    name: Android Unit Tests & APK Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Run Android unit tests & assemble debug APK
+        working-directory: android
+        run: ./gradlew testDebugUnitTest assembleDebug
+
+      - name: Verify BuildConfig has zero embedded secrets
+        run: |
+          bc="android/app/build/generated/source/buildConfig/debug/io/github/riggedlab/hark/BuildConfig.java"
+          grep -q 'DEFAULT_SERVER_URL = "";' "$bc"
+          grep -q 'DEFAULT_PHONE_TOKEN = "";' "$bc"
+          grep -q 'DEFAULT_E2EE_KEY = "";' "$bc"

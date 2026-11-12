@@ -1,0 +1,292 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  prepare:
+    name: Verify Tag & Create Draft Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify version consistency & run security gate
+        id: meta
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          pkg_ver="$(jq -r .version desktop/package.json)"
+          if [ "$ver" != "$pkg_ver" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match desktop/package.json ($pkg_ver). Run ./tools/release.sh $ver first."
+            exit 1
+          fi
+          if ! grep -q "versionName = \"$ver\"" android/app/build.gradle.kts; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match android/app/build.gradle.kts versionName."
+            exit 1
+          fi
+          python3 tools/oss_audit.py --strict-git
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          if [[ "$ver" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go test suite
+        run: CGO_ENABLED=0 go test ./...
+
+      - name: Create or reuse draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            notes="$(printf '%s\n' \
+              '### 下载说明' \
+              '- **macOS 桌面端**：下载 `hark-*-macos-universal.dmg`（同时支持 Apple Silicon 与 Intel；若首次打开提示未公证，终端执行一次 `xattr -cr /Applications/Hark.app` 即可）。' \
+              '- **Windows 桌面端**：下载 `hark-setup-*-amd64.exe` 安装运行。' \
+              '- **Linux 桌面端**：下载对应架构 `.deb` 或 `.tar.gz`。' \
+              '- **Android 手机端**：下载 `hark-*-android-arm64.apk` 安装，在「设备状态 → 服务器设置」填入信箱与共享密钥。' \
+              '- **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:'"${{ steps.meta.outputs.version }}"'` 或直接下载 `hark-mailbox-linux-*` 单二进制。' \
+              '- **NAS / 无界面 Worker**：下载 `hark-worker-*` 单二进制。' \
+              '')"
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag --title "Hark $GITHUB_REF_NAME" \
+              --notes "$notes" --generate-notes
+          fi
+
+  desktop:
+    needs: prepare
+    name: Desktop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS, os: macos-latest, platform: "darwin/universal" }
+          - { name: Windows, os: ubuntu-latest, platform: "windows/amd64" }
+          - { name: Linux, os: ubuntu-latest, platform: "linux/amd64,linux/arm64" }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+
+      - name: Install NSIS & osslsigncode (Windows cross-build)
+        if: matrix.name == 'Windows'
+        run: sudo apt-get update && sudo apt-get install -y nsis osslsigncode
+
+      - name: Import macOS signing & notarization credentials (optional)
+        if: matrix.name == 'macOS' && env.MACOS_CERTIFICATE != ''
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(openssl rand -base64 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain
+          echo "MACOS_SIGNING_IDENTITY=$MACOS_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool store-credentials notary --keychain "$keychain" \
+              --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+            echo "NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          fi
+
+      - name: Import Windows signing certificate (optional)
+        if: matrix.name == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+        run: |
+          echo "$WINDOWS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/code-signing.pfx"
+          echo "WINDOWS_CERTIFICATE_FILE=$RUNNER_TEMP/code-signing.pfx" >> "$GITHUB_ENV"
+
+      - name: Build desktop packages
+        working-directory: desktop
+        env:
+          MYGO_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: bun run build -- -platform "${{ matrix.platform }}"
+
+      - name: Collect & upload desktop installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p dist-upload
+          if [ "${{ matrix.name }}" = "macOS" ]; then
+            cp desktop/build/*/hark-*.dmg "dist-upload/hark-${VER}-macos-universal.dmg"
+          elif [ "${{ matrix.name }}" = "Windows" ]; then
+            cp desktop/build/*/*-setup-*.exe dist-upload/
+          else
+            cp desktop/build/*/*.deb desktop/build/*/*.tar.gz dist-upload/
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist-upload/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  android:
+    needs: prepare
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Prepare Android release keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || [ -z "$ANDROID_KEYSTORE_PASSWORD" ] || [ -z "$ANDROID_KEY_ALIAS" ] || [ -z "$ANDROID_KEY_PASSWORD" ]; then
+            echo "::error::Missing ANDROID_KEYSTORE_* secrets; refusing to publish an un-upgradeable debug-signed APK."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/hark-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/hark-release.jks" >> "$GITHUB_ENV"
+
+      - name: Test & assemble release APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew testDebugUnitTest assembleRelease
+
+      - name: Upload Android APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.prepare.outputs.version }}
+        run: |
+          out="hark-${VER}-android-arm64.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "$out"
+          gh release upload "$GITHUB_REF_NAME" "$out" --clobber --repo "$GITHUB_REPOSITORY"
+
+  server-and-cli:
+    needs: prepare
+    name: Server, CLI & GHCR Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cross-compile static CLI & Mailbox binaries
+        env:
+          VER: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p bin-upload
+          for target in "linux amd64" "linux arm64"; do
+            set -- $target
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" \
+              -o "bin-upload/hark-mailbox-${1}-${2}" ./server
+          done
+          for target in "linux amd64" "linux arm64" "darwin arm64" "windows amd64"; do
+            set -- $target
+            ext=""
+            [ "$1" = "windows" ] && ext=".exe"
+            CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags="-s -w" \
+              -o "bin-upload/hark-worker-${1}-${2}${ext}" ./cmd/hark-worker
+          done
+
+      - name: Upload static binaries to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" bin-upload/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Set up QEMU for multi-arch Docker build
+        run: docker run --privileged --rm tonistiigi/binfmt --install all
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase GHCR image tags
+        id: img
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VER: ${{ needs.prepare.outputs.version }}
+          PRE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          lc_owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [ "$PRE" = "false" ]; then
+            printf 'tags=ghcr.io/%s/hark-mailbox:%s,ghcr.io/%s/hark-mailbox:latest\n' "$lc_owner" "$VER" "$lc_owner" >> "$GITHUB_OUTPUT"
+          else
+            printf 'tags=ghcr.io/%s/hark-mailbox:%s\n' "$lc_owner" "$VER" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build & push multi-arch Mailbox Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.img.outputs.tags }}
+
+  publish:
+    needs: [prepare, desktop, android, server-and-cli]
+    name: Generate Checksums & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute SHA256SUMS.txt & publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          mkdir -p release-assets
+          gh release download "$GITHUB_REF_NAME" --dir release-assets --repo "$GITHUB_REPOSITORY"
+          (cd release-assets && sha256sum * | sort -k2 > ../SHA256SUMS.txt)
+          gh release upload "$GITHUB_REF_NAME" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=true
+          else
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi

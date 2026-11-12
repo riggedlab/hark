@@ -1,0 +1,508 @@
+{
+  "stage": "geometry_checked",
+  "unit": "millimeter",
+  "blender_version": "5.2.2 LTS",
+  "design_sha256": "6ae6d8ba3a0b16309a6812b939b156d3b33aec15d8e7e09246fa93520ea74b92",
+  "parameters_source": "../DESIGN.md (revised 2026-11-06)",
+  "command": "/Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup --python enclosure/v1/build.py",
+  "extra_environment_variables": {},
+  "parts": {
+    "case-front": {
+      "assembly": {
+        "bounds_mm": [
+          [
+            -11.300000190734863,
+            11.300000190734863
+          ],
+          [
+            -8.5,
+            23.799999237060547
+          ],
+          [
+            -15.199999809265137,
+            0.0
+          ]
+        ],
+        "dimensions_mm": [
+          22.600000381469727,
+          32.29999923706055,
+          15.199999809265137
+        ],
+        "volume_mm3": 2167.0594661596274,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 2090,
+        "faces": 4192
+      },
+      "expected_assembly_dimensions_mm": [
+        22.6,
+        32.3,
+        15.2
+      ],
+      "expected_assembly_bounds_mm": [
+        [
+          -11.3,
+          11.3
+        ],
+        [
+          -8.5,
+          23.8
+        ],
+        [
+          -15.2,
+          0
+        ]
+      ],
+      "print_stl": {
+        "bounds_mm": [
+          [
+            -11.300000190734863,
+            11.300000190734863
+          ],
+          [
+            0.0,
+            32.29999923706055
+          ],
+          [
+            -0.0,
+            15.199999809265137
+          ]
+        ],
+        "dimensions_mm": [
+          22.600000381469727,
+          32.29999923706055,
+          15.199999809265137
+        ],
+        "volume_mm3": 2167.0594231418872,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 2090,
+        "faces": 4192
+      },
+      "stl_sha256": "b5f030e233590f018cc0d7250841883fea690e7eb682442003a80843cb8cde15",
+      "export_quantization_mm": 0.001,
+      "print_transform": "(-x, y+8.5, -z)"
+    },
+    "case-back": {
+      "assembly": {
+        "bounds_mm": [
+          [
+            -10.350000381469727,
+            10.350000381469727
+          ],
+          [
+            0.10000000149011612,
+            23.799999237060547
+          ],
+          [
+            -15.199999809265137,
+            -5.159999847412109
+          ]
+        ],
+        "dimensions_mm": [
+          20.700000762939453,
+          23.69999923557043,
+          10.039999961853027
+        ],
+        "volume_mm3": 904.7722480908898,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 438,
+        "faces": 872
+      },
+      "expected_assembly_dimensions_mm": [
+        20.7,
+        23.7,
+        10.04
+      ],
+      "expected_assembly_bounds_mm": [
+        [
+          -10.35,
+          10.35
+        ],
+        [
+          0.1,
+          23.8
+        ],
+        [
+          -15.2,
+          -5.16
+        ]
+      ],
+      "print_stl": {
+        "bounds_mm": [
+          [
+            -10.350000381469727,
+            10.350000381469727
+          ],
+          [
+            0.0,
+            23.700000762939453
+          ],
+          [
+            0.0,
+            10.039999961853027
+          ]
+        ],
+        "dimensions_mm": [
+          20.700000762939453,
+          23.700000762939453,
+          10.039999961853027
+        ],
+        "volume_mm3": 904.7724038270101,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 438,
+        "faces": 872
+      },
+      "stl_sha256": "f025757705f69dfc2f0cf68a76e2ae2838b7211c0814949a995ed338140ce190",
+      "export_quantization_mm": 0.001,
+      "print_transform": "(x, y-0.1, z+15.2)"
+    },
+    "clip": {
+      "assembly": {
+        "bounds_mm": [
+          [
+            -6.0,
+            6.0
+          ],
+          [
+            1.0,
+            23.0
+          ],
+          [
+            -19.799999237060547,
+            -14.300000190734863
+          ]
+        ],
+        "dimensions_mm": [
+          12.0,
+          22.0,
+          5.499999046325684
+        ],
+        "volume_mm3": 855.6859648512361,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 226,
+        "faces": 448
+      },
+      "expected_assembly_dimensions_mm": [
+        12,
+        22,
+        5.5
+      ],
+      "expected_assembly_bounds_mm": [
+        [
+          -6,
+          6
+        ],
+        [
+          1,
+          23
+        ],
+        [
+          -19.8,
+          -14.3
+        ]
+      ],
+      "print_stl": {
+        "bounds_mm": [
+          [
+            0.0,
+            5.5
+          ],
+          [
+            0.0,
+            22.0
+          ],
+          [
+            0.0,
+            12.0
+          ]
+        ],
+        "dimensions_mm": [
+          5.5,
+          22.0,
+          12.0
+        ],
+        "volume_mm3": 855.6859528506448,
+        "non_manifold_edges": 0,
+        "connected_components": 1,
+        "degenerate_faces": 0,
+        "vertices": 226,
+        "faces": 448
+      },
+      "stl_sha256": "3eaaa5f3ed27190ceae3e635d60f3f7cd3499ca544fd5f51ca25864131adc4a9",
+      "export_quantization_mm": 0.001,
+      "print_transform": "(z+19.8, y-1, 6-x)"
+    }
+  },
+  "assembly_intersections": {
+    "case-front / case-back": 0.0,
+    "case-front / clip": 0.0,
+    "case-back / clip": 6.350475700855895e-14
+  },
+  "fits": {
+    "board_main": {
+      "bounds_mm": [
+        [
+          -9.8,
+          9.8
+        ],
+        [
+          0.25,
+          21.75
+        ],
+        [
+          -13.2,
+          -2.6
+        ]
+      ],
+      "intersection_volume_mm3": {
+        "case-front": 0.0,
+        "case-back": 2.2737367544323206e-13,
+        "clip": 0.0
+      },
+      "front_clearance": {
+        "surface_distance_mm": 0.17970359325408936,
+        "witness_points_mm": [
+          [
+            9.800000190734863,
+            21.75,
+            -13.199999809265137
+          ],
+          [
+            9.912914276123047,
+            21.889799118041992,
+            -13.199999809265137
+          ]
+        ],
+        "method": "bidirectional vertex-to-triangle; analytic parallel-face checks also recorded"
+      }
+    },
+    "usb_block": {
+      "bounds_mm": [
+        [
+          -4.47,
+          4.47
+        ],
+        [
+          21.75,
+          23.75
+        ],
+        [
+          -4.86,
+          -1.6
+        ]
+      ],
+      "intersection_volume_mm3": {
+        "case-front": 0.0,
+        "case-back": 0.0,
+        "clip": 0.0
+      },
+      "front_clearance": {
+        "surface_distance_mm": 0.20000004768371582,
+        "witness_points_mm": [
+          [
+            4.46999979019165,
+            23.75,
+            -1.600000023841858
+          ],
+          [
+            4.469999313354492,
+            23.75,
+            -1.399999976158142
+          ]
+        ],
+        "method": "bidirectional vertex-to-triangle; analytic parallel-face checks also recorded"
+      }
+    },
+    "tongue_to_front": {
+      "surface_distance_mm": 0.09925711899995804,
+      "witness_points_mm": [
+        [
+          9.777000427246094,
+          21.858999252319336,
+          -14.899999618530273
+        ],
+        [
+          9.818975448608398,
+          21.948944091796875,
+          -14.899999618530273
+        ]
+      ],
+      "method": "bidirectional vertex-to-triangle; analytic parallel-face checks also recorded",
+      "x_side_clearance_mm": [
+        0.10000038146972656,
+        0.10000038146972656
+      ],
+      "clearance_method": "rays through final mesh at y=23,z=-10",
+      "tongue_to_USB_block_z_mm": 0.3,
+      "PCB_end_y_clearance_mm": 0.15,
+      "note": "tongue upper face z=-5.16; front opening ends z=-1.4; nominal USB underside is -5.06"
+    },
+    "dovetail": {
+      "intersection_volume_mm3": 6.350475700855895e-14,
+      "right_x_clearance_mm": 0.1499999999999999,
+      "left_root_horizontal_clearance_mm": 0.1499999999999999,
+      "left_tip_horizontal_clearance_mm": 0.06999999999999984,
+      "left_slope_min_normal_clearance_mm": 0.05466081666101213,
+      "depth_clearance_mm": 0.1,
+      "stop_y_clearance_mm": 0.1,
+      "note": "hard coordinates govern; sloped-side horizontal gap tapers 0.15 to 0.07; contact at base plane is intended",
+      "measured_final_mesh": {
+        "near_root": {
+          "left_horizontal_mm": 0.14999127388000488,
+          "right_mm": 0.15000009536743164
+        },
+        "near_tip": {
+          "left_horizontal_mm": 0.0700082778930664,
+          "right_mm": 0.14999961853027344
+        },
+        "depth_mm": 0.10000038146972656,
+        "stop_y_mm": 0.09999895095825195
+      }
+    },
+    "conduit_to_board_z_mm": 0.20000000000000018,
+    "conduit_to_nominal_microphone_z_mm": 1.5
+  },
+  "assumptions": [
+    "外边倒角应用在盖板上下外边；舌片与倒角后盖板按公共面精确并集。",
+    "夹紧凸棱未规定沿 y 宽度，采用以 y=17 为中心、底宽1.2、高0.6的三角棱。",
+    "导入翘边在 y=20..22.5 线性外翘1.0，保持z方向1.4厚度。",
+    "主身外形25.0长不含挂绳耳；整件含耳32.3。单边槽最大宽6.8，原文7.6是更保守旧桥接描述。"
+  ],
+  "machine_actions_performed_by_agent": false,
+  "physical_result_verified": false,
+  "features_measured_final_mesh": {
+    "microphone": {
+      "center_xy_mm": [
+        0,
+        5.65
+      ],
+      "bore_diameter_mm": 1.4999998807907104,
+      "conduit_tip_z_mm": -2.4000000953674316
+    },
+    "pinhole_diameters_mm": [
+      1.5999999046325684,
+      1.6000001430511475
+    ],
+    "LED_skin_thicknesses_mm": [
+      0.3600000739097595,
+      0.36000001430511475
+    ],
+    "lanyard_hole_diameter_mm": 2.5999999046325684,
+    "USB_ceiling_z_mm": -1.4000000953674316,
+    "tongue_tip_z_mm": -5.159999847412109
+  },
+  "native_3mf": {
+    "path": "diting-case-v1-K3.3mf",
+    "sha256": "8c32a4324b7b4c50632ef5eeeee2f2aebba3bbc1544705d06f198a86b0ee8536",
+    "template_sha256": "0b8c8ea55097ec87088a00739f86a9e108f29be9f3032f0429337e0564f50859",
+    "unit": "millimeter",
+    "settings": {
+      "layer_height": "0.16",
+      "initial_layer_print_height": "0.16",
+      "wall_loops": "3",
+      "sparse_infill_density": "100%",
+      "enable_support": "0",
+      "brim_type": "no_brim",
+      "brim_width": "0",
+      "skirt_loops": "0",
+      "enable_prime_tower": "0"
+    },
+    "placements_xy_mm": {
+      "case-front": [
+        94,
+        100
+      ],
+      "case-back": [
+        122,
+        100
+      ],
+      "clip": [
+        144,
+        100
+      ]
+    },
+    "minimum_xy_bbox_gap_mm": 6.35,
+    "native_project_not_cached_toolpaths": true
+  },
+  "previews": {
+    "images_generated": [
+      "assembly-front.png",
+      "assembly-back.png",
+      "exploded.png",
+      "exploded-back.png",
+      "print-layout.png",
+      "front-orthographic.png",
+      "front-inside.png",
+      "back-slot.png",
+      "clip-side.png"
+    ],
+    "human_visual_review": {
+      "status": "reviewed_by_agent_using_view_image",
+      "date": "2026-11-06",
+      "design_sha256": "6ae6d8ba3a0b16309a6812b939b156d3b33aec15d8e7e09246fa93520ea74b92",
+      "image_sha256": {
+        "assembly-back.png": "6658fe2ee5504d05712e9e4ec65c550a9339a2c9b4e1365492e65cdadd0a5ce5",
+        "assembly-front.png": "3b55d00f3f3618f7c68be4f2a45e62770a187a32157756a0d9b596af3c5728de",
+        "back-slot.png": "42f63b8ed7156b42c33ef7e7b4bdf17c9cee1d6a6759e4241586b3a82d0f82f9",
+        "clip-side.png": "5da515a767cf0cc166cf8d311196e4dcad5c18e7cae013051d874d7ad0151886",
+        "exploded-back.png": "a963fbc643fc61cb8afa6da1829165408b7fe95a93d3beb8f1ed1a4e4183266f",
+        "exploded.png": "141d034398fca6a314cdd872d4c6fc4be0f34e39c1a8a36bde5e54b69cd53d25",
+        "front-inside.png": "a2d38d34406ce059f4db15499d417a9dab5cc6cd78e1b5d622ac048bf924df6a",
+        "front-orthographic.png": "e9f8d360eef9a54577f54f5619bf6045b31f4482e59af95d63bf9346e6065793",
+        "print-layout.png": "20968e77a89d7b08243b27052ff2b5d28c3b8cedc891f8f168fc780f9b2bafbe"
+      },
+      "observations": [
+        "正视和前壳内侧图确认：麦克风孔在(0,5.65)，两顶针孔位于(-4.7,5.65)与(4.5,5.65)，导声管向腔内伸出；三孔均通。",
+        "两灯窗位于USB端附近的(±6.3,20.85)，是从内侧挖出的盲孔，正面保持封闭薄皮；没有误做成通孔。",
+        "USB U形槽朝+y并一直开到后口，后盖舌片填补下段，装配后在USB高度保留开口。",
+        "挂绳耳从-y端伸出并与正面齐平，中央通孔朝z；撬口位于同端后口，未与挂绳孔混淆。",
+        "后盖单边燕尾槽朝+y的USB端开放，-y端保留挡块；+x侧直、-x侧斜，背夹燕尾与此匹配。",
+        "背夹处于后盖外侧，U弯在-y端，夹紧凸棱和外翘导入边在+y端。",
+        "打印排布从左到右为前壳、后盖、背夹：前壳正面朝下，后盖外表面朝下，背夹+x侧朝下。几何间距至少6.35mm。"
+      ],
+      "toolpath_review": {
+        "path": "sliced/toolpaths.png",
+        "image_sha256": "846a263daa059efa9bccc62c8a17cd8e60782b7da09f48cac45b16d570a9109f",
+        "gcode_sha256": "fd48bdf66885aa2e589a64dfab4840e2c3d96a8cd70ec08714de8051667543b6",
+        "observed_layers_z_mm": [
+          0.16,
+          0.48,
+          1.12,
+          3.2,
+          12,
+          15.2
+        ],
+        "observations": [
+          "首层三个对象分别在预期范围落床，麦克风、顶针与挂绳孔均保留，未见brim或支撑轮廓。后盖舌片底部两小脚也贴床。",
+          "Z=0.48的前壳灯窗已出现盲孔轮廓，首层仍有封闭底皮。",
+          "后盖燕尾槽在Z=1.12出现横向桥接刀路；背夹燕尾在Z=3.20开始有连续刀路，没有此前双边燕尾的独立起始岛。",
+          "Z=12.00和15.20的末层保留背夹/前壳侧壁及U形开口，未出现额外支撑或擦料塔。"
+        ],
+        "limitations": "仅检查刀路与几何；未验证0.9mm侧向小台阶、桥接下垂、首层附着和PLA弹性等实物表现。"
+      },
+      "physical_result_verified": false,
+      "image_pixel_sha256": {
+        "assembly-back.png": "293812d8a8f7d98d0056d99e00f8489382d4366fa0260b511bd97c5805a10bd3",
+        "assembly-front.png": "0feb3c6eceb7dc9c31f08be06eea2f91a801296e4c056c8d0e78cd838d14949b",
+        "back-slot.png": "683d89813b2f4958d9fce35164bf965e198a5a8f969efa9e464a573b4cec9d88",
+        "clip-side.png": "8337afa141cf23e41c2de87df89534702860f0d42ca799323a9a19129720d840",
+        "exploded-back.png": "87be6008a2cc6d9e188bb26ba4d92beb20c666c24a2124ac263d9cc640f7f95c",
+        "exploded.png": "0b5d77aa3c13a9aef65d1d14084d2a8491b6f509a430c899cc73736243dc80eb",
+        "front-inside.png": "edaabeaa049f86a4d8673a1c2111f3b77b0d95604964fb704f614f5bdefc4db1",
+        "front-orthographic.png": "2202ce644d5806351b45bdf86047d181095e7ee0f9c46769768035f35a064b4c",
+        "print-layout.png": "83759a449abedd4d70e14410e91af501f7a8edb82e6affd6d9ff70204e333445"
+      },
+      "image_identity_method": "PNG IHDR+IDAT content; exclude Blender Date/RenderTime text metadata; originally viewed file hashes also retained."
+    },
+    "reviewed_png_pixels_match_current_files": true
+  }
+}

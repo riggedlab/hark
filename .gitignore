@@ -1,0 +1,57 @@
+# 隐私：录音文件绝不提交（仅放行内置连通测试样本）
+recordings/
+*.wav
+*.opus
+!internal/asr/probe.opus
+*.ogg
+*.m4a
+*.mp3
+*.flac
+
+# 编译产物与本地缓存
+firmware/build*/
+desktop/node_modules/
+desktop/dist/
+desktop/build/
+desktop/.mygo/
+/hark-mailbox
+/hark-worker
+__pycache__/
+.venv/
+.pytest_cache/
+enclosure/**/sliced/
+enclosure/**/*.log
+*.gcode
+*.3mf
+*.blend
+
+# 系统文件
+.DS_Store
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+*.aab
+
+# 运行期数据、密钥与环境配置，绝不提交
+.secrets/
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+server/data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
