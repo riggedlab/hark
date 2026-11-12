@@ -48,6 +48,8 @@ data class Status(
     val message: String? = null,
     val pendingUploads: Int = 0,
     val uploadedThisSession: Int = 0,
+    val localAsrRunning: String? = null,
+    val localAsrError: String? = null,
     val textVersion: Int = 0,
     val lastWriteNanos: Long = 0,
     val liveLevel: Float? = null,

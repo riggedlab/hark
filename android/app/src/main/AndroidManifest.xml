@@ -29,6 +29,7 @@
         android:label="Hark · 谛听"
         android:icon="@drawable/ic_launcher"
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity

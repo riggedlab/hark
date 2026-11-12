@@ -54,6 +54,7 @@ object Sync {
         }
 
     suspend fun pushSpeakerEdits(ctx: Context): Boolean = pushing.withLock {
+        if (Config.mode(ctx) != WorkMode.CLOUD) return@withLock true
         val cfg = Config.load(ctx) ?: return@withLock false
         val (revision, body) = Speakers.pending(ctx) ?: return@withLock true
         try {
@@ -74,6 +75,7 @@ object Sync {
             aad.toByteArray(Charsets.UTF_8)).toString(Charsets.UTF_8))
 
     suspend fun pollOnce(ctx: Context, waitSec: Int = 0): Boolean = polling.withLock {
+        if (Config.mode(ctx) != WorkMode.CLOUD) return@withLock false
         val cfg = Config.load(ctx) ?: return@withLock false
         try {
             if (!pushSpeakerEdits(ctx)) return@withLock false

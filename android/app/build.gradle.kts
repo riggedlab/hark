@@ -51,6 +51,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 本地配置了 ANDROID_KEYSTORE_PATH 时与 Release 共用同一签名，方便真机无缝覆盖调试
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             // CI 发版注入持久签名密钥（保证跨版本覆盖升级不丢数据）；本地未配密钥时回退 debug 签名方便直装
@@ -63,6 +67,16 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
+    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/probeAssets"))
+}
+
+val syncProbeAsset by tasks.registering(Copy::class) {
+    from(rootProject.file("../internal/asr/probe.opus"))
+    into(layout.buildDirectory.dir("generated/probeAssets"))
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncProbeAsset)
 }
 
 dependencies {
@@ -82,4 +96,5 @@ dependencies {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }

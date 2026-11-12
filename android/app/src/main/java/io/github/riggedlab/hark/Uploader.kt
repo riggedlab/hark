@@ -3,26 +3,45 @@ package io.github.riggedlab.hark
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 把录好的 .opus 上传到信箱。上传成功后在 files/uploaded/ 里放一个同名标记文件。
- * 失败了没关系，下一轮会再试（服务器端同名上传是幂等的）。
+ * 处理录好的 .opus 片段：
+ * - 云端信箱模式 (CLOUD)：加密上传到信箱 /v2/inbox，成功后写 files/uploaded/<name>。
+ * - 手机直连模式 (DIRECT_ASR)：本机直调三方 ASR 生成 files/texts/<name>.json（不写 uploaded/，
+ *   7 天内切回云端模式时会自动把未上传录音加密补传回电脑端 hark.db）。
  */
 class Uploader(private val ctx: Context) {
     private val chunkDir = RecorderService.chunkDir(ctx)
     private val markDir = File(ctx.filesDir, "uploaded").apply { mkdirs() }
-
     private val silentDir = File(ctx.filesDir, "novoice").apply { mkdirs() }
 
     fun isUploaded(f: File) = File(markDir, f.name).exists()
-    /** 这段录音没有人声，没有上传（录音本身照常在手机上保留 7 天） */
+    /** 这段录音没有人声，不上传也不调云端 ASR（录音本身照常在手机上保留 7 天） */
     fun isSilent(f: File) = File(silentDir, f.name).exists()
+    fun isSkippedBadAudio(f: File) = (badFileFailures[f.name] ?: 0) >= MAX_BAD_FILE_ATTEMPTS
+
+    /** 按当前工作模式处理待办片段，返回 (本次完成数, 剩余待处理数) */
+    fun processPending(): Pair<Int, Int> = when (Config.mode(ctx)) {
+        WorkMode.CLOUD -> uploadPending()
+        WorkMode.DIRECT_ASR -> transcribePendingLocally()
+    }
+
+    fun hasPendingWork(): Boolean = when (Config.mode(ctx)) {
+        WorkMode.CLOUD -> pendingCloud().isNotEmpty()
+        WorkMode.DIRECT_ASR -> pendingLocalAsr().isNotEmpty()
+    }
+
+    /** 尚未加密上传到云端信箱的有声/待检片段数（供手机直连模式提示切回云端可补传的数量） */
+    fun unuploadedCount(): Int = pendingCloud().size
 
     /** 上传所有还没上传的录音，返回 (成功数, 剩余数) */
     fun uploadPending(): Pair<Int, Int> = synchronized(uploadLock) {
-        val cfg = Config.load(ctx) ?: return 0 to pending().size
+        if (Config.mode(ctx) != WorkMode.CLOUD) return 0 to pendingLocalAsr().size
+        val cfg = Config.load(ctx) ?: return 0 to pendingCloud().size
         var ok = 0
-        for (f in pending()) {
+        for (f in pendingCloud()) {
+            if (Config.mode(ctx) != WorkMode.CLOUD) break
             val speech = Vad.speechSeconds(ctx, f)
             if (speech != null && speech < Vad.MIN_SPEECH_S) {
                 File(silentDir, f.name).createNewFile()
@@ -34,16 +53,75 @@ class Uploader(private val ctx: Context) {
                 ok++
             } else break                     // 网络不通就别一个个试了，等下一轮
         }
-        markDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
-        silentDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
-        return ok to pending().size
+        cleanupMarkers()
+        return ok to pendingCloud().size
     }
 
-    fun hasPending() = pending().isNotEmpty()
+    /** 手机本机直调三方 ASR 转写尚未出字的录音，返回 (成功数, 剩余数) */
+    fun transcribePendingLocally(): Pair<Int, Int> = synchronized(uploadLock) {
+        if (Config.mode(ctx) != WorkMode.DIRECT_ASR) return 0 to pendingCloud().size
+        val cfg = AsrConfig.load(ctx) ?: return 0 to pendingLocalAsr().size
+        var ok = 0
+        for (f in pendingLocalAsr()) {
+            if (Config.mode(ctx) != WorkMode.DIRECT_ASR) break
+            val speech = Vad.speechSeconds(ctx, f)
+            if (speech != null && speech < Vad.MIN_SPEECH_S) {
+                File(silentDir, f.name).createNewFile()
+                Log.i(TAG, "${f.name} 没有人声，跳过手机转写")
+                continue
+            }
+            AppState.update { it.copy(localAsrRunning = f.name) }
+            var abortBatch = false
+            runCatching {
+                val json = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
+                Transcripts.save(ctx, json)
+            }.onSuccess {
+                ok++
+                badFileFailures.remove(f.name)
+                AppState.update {
+                    it.copy(
+                        localAsrRunning = null,
+                        localAsrError = null,
+                        textVersion = it.textVersion + 1,
+                    )
+                }
+            }.onFailure { e ->
+                Log.w(TAG, "local asr ${f.name} failed: ${e.message}")
+                val kind = (e as? PhoneAsrException)?.kind ?: AsrFailureKind.TRANSIENT
+                if (kind == AsrFailureKind.BAD_AUDIO) {
+                    // 单文件格式/解码异常：记次后跳过继续转写后续新录音，不阻塞整条队列，同时保留原音频
+                    badFileFailures[f.name] = (badFileFailures[f.name] ?: 0) + 1
+                } else {
+                    abortBatch = true
+                }
+                AppState.update {
+                    it.copy(
+                        localAsrRunning = null,
+                        localAsrError = e.message?.take(120) ?: "转写失败",
+                    )
+                }
+            }
+            if (abortBatch) break
+        }
+        cleanupMarkers()
+        return ok to pendingLocalAsr().size
+    }
 
-    private fun pending() =
+    private fun cleanupMarkers() {
+        markDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
+        silentDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
+        badFileFailures.keys.removeIf { !File(chunkDir, it).exists() }
+    }
+
+    private fun pendingCloud() =
         (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
-            .filter { !isUploaded(it) && !isSilent(it) }.sortedBy { it.name }
+            .filter { !isUploaded(it) && !isSilent(it) }
+            .sortedBy { it.name }
+
+    private fun pendingLocalAsr() =
+        (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
+            .filter { !isSilent(it) && (badFileFailures[it.name] ?: 0) < MAX_BAD_FILE_ATTEMPTS && Transcripts.get(ctx, it.name) == null }
+            .sortedBy { it.name }
 
     private fun upload(cfg: Config, f: File): Boolean = runCatching {
         val packet = Crypto.packAudio(cfg.e2eeKey, f.name, f.readBytes())
@@ -65,7 +143,11 @@ class Uploader(private val ctx: Context) {
 
     companion object {
         private const val TAG = "Uploader"
-        // 前台、录音服务和收尾线程共用，避免同时运行 VAD 和重复上传。
+        private const val MAX_BAD_FILE_ATTEMPTS = 2
+        // 前台、录音服务和收尾线程共用，避免同时运行 VAD、重复上传或重复调 ASR。
         private val uploadLock = Any()
+        private val badFileFailures = ConcurrentHashMap<String, Int>()
+
+        fun clearLocalAsrFailures() = badFileFailures.clear()
     }
 }

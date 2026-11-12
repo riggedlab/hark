@@ -91,8 +91,8 @@ class RecorderService : Service() {
             Places.backfill(this)
         }, 10, 300, TimeUnit.SECONDS)
         // 每小时清理一次 7 天前的录音
-        io.scheduleAtFixedRate({ Recordings.cleanup(chunkDir(this)) }, 0, 1, TimeUnit.HOURS)
-        // 每分钟检查一次有没有录好但还没上传的文件
+        io.scheduleAtFixedRate({ Recordings.cleanup(chunkDir(this), Config.mode(this)) }, 0, 1, TimeUnit.HOURS)
+        // 每分钟检查一次有没有录好但还没上传/转写的文件
         net.scheduleWithFixedDelay({ requestSync() }, 5, 60, TimeUnit.SECONDS)
     }
 
@@ -102,9 +102,11 @@ class RecorderService : Service() {
             net.execute {
                 // 单线程防重入；执行中产生的新片段再排一次，不等下一分钟
                 syncQueued.set(false)
-                val (ok, left) = uploader.uploadPending()
+                val (ok, left) = uploader.processPending()
                 AppState.update { it.copy(pendingUploads = left, uploadedThisSession = it.uploadedThisSession + ok) }
-                runBlocking { Sync.pollOnce(this@RecorderService) }
+                if (Config.mode(this@RecorderService) == WorkMode.CLOUD) {
+                    runBlocking { Sync.pollOnce(this@RecorderService) }
+                }
             }
         } catch (_: RejectedExecutionException) { syncQueued.set(false) }
     }
@@ -139,11 +141,13 @@ class RecorderService : Service() {
         }, upload = {
             try {
                 val finalUploader = Uploader(ctx)
-                if (finalUploader.hasPending()) {
-                    val (uploaded, pending) = finalUploader.uploadPending()
+                if (finalUploader.hasPendingWork()) {
+                    val (done, pending) = finalUploader.processPending()
                     AppState.update { it.copy(pendingUploads = pending,
-                        uploadedThisSession = it.uploadedThisSession + uploaded) }
-                    runBlocking { Sync.pollOnce(ctx, 0) }
+                        uploadedThisSession = it.uploadedThisSession + done) }
+                    if (Config.mode(ctx) == WorkMode.CLOUD) {
+                        runBlocking { Sync.pollOnce(ctx, 0) }
+                    }
                 }
             } catch (e: Exception) {
                 android.util.Log.w("RecorderService", "最后一段待下次前台同步重试", e)

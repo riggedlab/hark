@@ -37,13 +37,15 @@ object Recordings {
     }
 
     /** 删除 RETENTION_DAYS 天之前的录音（按自然日：今天 + 前 6 天保留） */
-    fun cleanup(dir: File, today: LocalDate = LocalDate.now()) {
+    fun cleanup(dir: File, mode: WorkMode = WorkMode.CLOUD, today: LocalDate = LocalDate.now()) {
         val keepFrom = today.minusDays(RETENTION_DAYS - 1).atStartOfDay()
-        // 还没上传的不删：服务器连不上时宁可多占空间，也不能丢录音
+        // 还没处理完的不删：断网或欠费时宁可多占空间，也不能丢录音
         val done = listOf("uploaded", "novoice").map { File(dir.parentFile, it) }
+        val textsDir = File(dir.parentFile, "texts")
         dir.listFiles { f -> f.name.endsWith(".opus") }?.forEach { f ->
             val start = parseStart(f)
-            val handled = done.any { File(it, f.name).exists() }
+            val localTranscribed = mode == WorkMode.DIRECT_ASR && File(textsDir, "${f.name}.json").exists()
+            val handled = done.any { File(it, f.name).exists() } || localTranscribed
             if (start != null && start.isBefore(keepFrom) && handled) f.delete()
         }
         Waveforms.cleanup(dir)

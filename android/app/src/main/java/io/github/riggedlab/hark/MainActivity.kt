@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -29,8 +30,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -43,6 +46,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -94,8 +99,9 @@ class MainActivity : ComponentActivity() {
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        Recordings.cleanup(RecorderService.chunkDir(this))
+        Recordings.cleanup(RecorderService.chunkDir(this), Config.mode(this))
         hasLocation = Places.hasPermission(this)
         Thread { Places.backfill(this) }.start()     // 之前没查到名字的地点，补查一次
         setContent { DitingTheme { Screen() } }
@@ -169,14 +175,27 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(lifecycle, configVersion) {
             lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
                 while (true) {
+                    val mode = Config.mode(this@MainActivity)
                     val ok = withContext(Dispatchers.IO) {
-                        val (uploaded, pending) = uploader.uploadPending()
+                        val (done, pending) = uploader.processPending()
                         AppState.update { it.copy(pendingUploads = pending,
-                            uploadedThisSession = it.uploadedThisSession + uploaded) }
-                        Sync.pollOnce(this@MainActivity, waitSec = 20)
+                            uploadedThisSession = it.uploadedThisSession + done) }
+                        if (mode == WorkMode.CLOUD) {
+                            Sync.pollOnce(this@MainActivity, waitSec = 20)
+                        } else {
+                            done > 0
+                        }
                     }
+                    if (ok) recs = withContext(Dispatchers.IO) { Recordings.list(this@MainActivity) }
                     dataVersion++
-                    if (!ok) delay(5_000)
+                    if (!ok) {
+                        val waitMs = when {
+                            mode == WorkMode.DIRECT_ASR && AppState.status.value.localAsrError != null -> 20_000L
+                            mode == WorkMode.DIRECT_ASR -> 3_000L
+                            else -> 5_000L
+                        }
+                        delay(waitMs)
+                    }
                 }
             }
         }
@@ -211,7 +230,7 @@ class MainActivity : ComponentActivity() {
                 HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1) { page ->
                     when (page) {
                         0 -> EventsPage(recs)
-                        1 -> RecordingsPage(recs, s.remote)
+                        1 -> RecordingsPage(recs, s)
                         2 -> PeoplePage(recs)
                         else -> PlacesPage()
                     }
@@ -221,13 +240,15 @@ class MainActivity : ComponentActivity() {
         if (showStatus) {
             ModalBottomSheet(onDismissRequest = { showStatus = false }) { StatusSheet(s, whitelisted) }
         }
-        ServerDialog()
+        SettingsDialog()
         PersonDialogs(recs)
         PlaceDialogs()
     }
 
     @Composable
     private fun Header(s: Status, onStatus: () -> Unit) {
+        @Suppress("UNUSED_EXPRESSION") configVersion
+        val mode = Config.mode(this@MainActivity)
         Row(Modifier.fillMaxWidth().statusBarsPadding().padding(start = 20.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically) {
             Text("Hark · 谛听", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -236,14 +257,24 @@ class MainActivity : ComponentActivity() {
                 Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(shortLabel(s.link), style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (s.remote.workerOnline && s.remote.workerPhase == "transcribing") {
+                    val transcribing = if (mode == WorkMode.DIRECT_ASR) {
+                        s.localAsrRunning != null
+                    } else {
+                        s.remote.workerOnline && s.remote.workerPhase == "transcribing"
+                    }
+                    if (transcribing) {
                         Spacer(Modifier.width(8.dp))
                         Text("转写中", style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     val remote = s.remote
-                    if (Config.load(this@MainActivity) != null && (remote.mailboxReachable == false ||
-                            (remote.inboxCount > 0 && !remote.workerOnline) || remote.asrOk == false)) {
+                    val hasWarning = if (mode == WorkMode.DIRECT_ASR) {
+                        AsrConfig.load(this@MainActivity) == null || s.localAsrError != null
+                    } else {
+                        Config.load(this@MainActivity) != null && (remote.mailboxReachable == false ||
+                            (remote.inboxCount > 0 && !remote.workerOnline) || remote.asrOk == false)
+                    }
+                    if (hasWarning) {
                         Spacer(Modifier.width(8.dp))
                         StatusDot(Color(0xFFF2A33A), breathing = false)
                     }
@@ -370,8 +401,29 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun StatusSheet(s: Status, whitelisted: Boolean) {
+        @Suppress("UNUSED_EXPRESSION") configVersion
+        val mode = Config.mode(this@MainActivity)
         Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
             Text("设备状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(10.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                WorkMode.entries.forEachIndexed { idx, item ->
+                    SegmentedButton(
+                        selected = mode == item,
+                        onClick = {
+                            if (mode != item) {
+                                Config.setMode(this@MainActivity, item)
+                                configVersion++
+                                dataVersion++
+                                val ready = if (item == WorkMode.CLOUD) Config.load(this@MainActivity) != null
+                                else AsrConfig.load(this@MainActivity) != null
+                                if (!ready) editingServer = true
+                            }
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index = idx, count = WorkMode.entries.size),
+                    ) { Text(item.label) }
+                }
+            }
             Spacer(Modifier.height(12.dp))
             s.message?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
             InfoRow("连接", s.link.label)
@@ -389,19 +441,39 @@ class MainActivity : ComponentActivity() {
                     InfoRow("当前片段", "${start?.format(T) ?: ""} 起，已录 ${fmtDuration(s.currentChunkSeconds)}")
                 }
             }
-            val hint = Config.statusHint(this@MainActivity)
-            InfoRow("上传", when {
-                hint != null -> hint
-                s.pendingUploads > 0 -> "手机待上传 ${s.pendingUploads} 段（每分钟自动重试）"
-                else -> "已全部加密上传"
-            })
-            val remote = s.remote
-            InfoRow("信箱", when (remote.mailboxReachable) {
-                true -> "已连接（端到端加密" + (if (remote.inboxCount > 0) " · 待取 ${remote.inboxCount} 段）" else "）")
-                false -> "连接不上（${remote.mailboxError ?: "请检查网络"}）"
-                null -> "正在连接…"
-            })
-            InfoRow("转写端", workerLabel(remote))
+            if (mode == WorkMode.DIRECT_ASR) {
+                val asrHint = AsrConfig.statusHint(this@MainActivity)
+                val asrCfg = AsrConfig.load(this@MainActivity)
+                InfoRow("转写服务", asrCfg?.let { "${it.provider.shortLabel}（${it.model.ifBlank { it.baseUrl }}）" } ?: (asrHint ?: "未配置"))
+                InfoRow("本机转写", when {
+                    asrHint != null -> asrHint
+                    s.localAsrRunning != null -> {
+                        val at = Recordings.parseStart(java.io.File(s.localAsrRunning))?.format(T) ?: s.localAsrRunning
+                        "正在转写 $at 片段…"
+                    }
+                    s.localAsrError != null -> "待重试（${s.localAsrError}）"
+                    s.pendingUploads > 0 -> "待本机转写 ${s.pendingUploads} 段"
+                    else -> "已全部本机转写"
+                })
+                val unbacked = remember(dataVersion, configVersion, s.pendingUploads) { uploader.unuploadedCount() }
+                if (unbacked > 0) {
+                    InfoRow("云端归档", "有 $unbacked 段录音仅在手机，切到「云端信箱同步」可自动补传到电脑 hark.db")
+                }
+            } else {
+                val hint = Config.statusHint(this@MainActivity)
+                InfoRow("上传", when {
+                    hint != null -> hint
+                    s.pendingUploads > 0 -> "手机待上传 ${s.pendingUploads} 段（每分钟自动重试）"
+                    else -> "已全部加密上传"
+                })
+                val remote = s.remote
+                InfoRow("信箱", when (remote.mailboxReachable) {
+                    true -> "已连接（端到端加密" + (if (remote.inboxCount > 0) " · 待取 ${remote.inboxCount} 段）" else "）")
+                    false -> "连接不上（${remote.mailboxError ?: "请检查网络"}）"
+                    null -> "正在连接…"
+                })
+                InfoRow("转写端", workerLabel(remote))
+            }
             InfoRow("定位", if (hasLocation) "已开启（记录只存在手机上）" else "未开启")
             var updateHint by remember { mutableStateOf<String?>(null) }
             var updateUrl by remember { mutableStateOf<String?>(null) }
@@ -412,7 +484,7 @@ class MainActivity : ComponentActivity() {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (s.link == LinkState.STOPPED) Button(onClick = { requestStart() }) { Text("开始录音") }
                 else OutlinedButton(onClick = { stopRecorder() }) { Text("停止录音") }
-                OutlinedButton(onClick = { editingServer = true }) { Text("服务器设置") }
+                OutlinedButton(onClick = { editingServer = true }) { Text("转写与同步设置") }
                 OutlinedButton(onClick = { requestStart(repair = true) }) { Text("重新配对") }
                 if (updateUrl != null) {
                     Button(onClick = {
@@ -476,6 +548,10 @@ class MainActivity : ComponentActivity() {
             val otherKeys = g.mapNotNull { l ->
                 l.seg.speaker?.takeIf { it.startsWith("other_") }?.let { "${l.rec.name}:$it" }
             }.distinct()
+            val hasKnownVoiceprint = g.any { l ->
+                val raw = l.seg.speaker
+                raw != null && !raw.startsWith("other_") && Speakers.resolve(this, raw) != null
+            }
             val paras = ArrayList<Para>()
             for (l in g) {
                 val raw = l.seg.speaker
@@ -484,8 +560,14 @@ class MainActivity : ComponentActivity() {
                     sp != null -> Triple(sp.name ?: sp.defaultName, sp.id, sp.id)
                     raw != null && raw.startsWith("other_") -> {
                         val k = "${l.rec.name}:$raw"
-                        val label = if (otherKeys.size > 1) "其他人 ${otherKeys.indexOf(k) + 1}" else "其他人"
-                        Triple(label, null, k)
+                        when {
+                            hasKnownVoiceprint -> {
+                                val label = if (otherKeys.size > 1) "其他人 ${otherKeys.indexOf(k) + 1}" else "其他人"
+                                Triple(label, null, k)
+                            }
+                            otherKeys.size > 1 -> Triple("对话人 ${otherKeys.indexOf(k) + 1}", null, k)
+                            else -> Triple(null, null, k)
+                        }
                     }
                     else -> Triple(null, null, "unknown")
                 }
@@ -501,10 +583,16 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun EventsPage(recs: List<Recording>) {
         @Suppress("UNUSED_EXPRESSION") dataVersion
+        @Suppress("UNUSED_EXPRESSION") configVersion
         val events = remember(recs, dataVersion) { buildEvents(recs) }
         val byDay = events.groupBy { it.start.toLocalDate() }.toSortedMap(compareByDescending { it })
+        val emptyBody = if (Config.mode(this@MainActivity) == WorkMode.DIRECT_ASR) {
+            "开始录音后，手机会自动调用直连 ASR 生成文字。"
+        } else {
+            "录音加密上传后，电脑端转写完会自动同步到这里。"
+        }
         PageList {
-            if (events.isEmpty()) item { Empty(Icons.Rounded.Notes, "还没有文字", "录音上传后，家里的 Mac 转写完会自动出现在这里。") }
+            if (events.isEmpty()) item { Empty(Icons.Rounded.Notes, "还没有文字", emptyBody) }
             byDay.forEach { (day, evs) ->
                 item(key = "d$day") { DayHeader(dayLabel(day)) }
                 items(evs.sortedByDescending { it.start }, key = { "e" + it.paras.first().lines.first().let { l -> l.rec.name + l.seg.start } }) { ev ->
@@ -598,19 +686,20 @@ class MainActivity : ComponentActivity() {
     // ───────────────────────────── 录音 ─────────────────────────────
 
     @Composable
-    private fun RecordingsPage(recs: List<Recording>, remote: RemoteStatus) {
+    private fun RecordingsPage(recs: List<Recording>, s: Status) {
+        @Suppress("UNUSED_EXPRESSION") configVersion
         val byDay = recs.groupBy { it.start.toLocalDate() }
         PageList {
             if (recs.isEmpty()) item { Empty(Icons.Rounded.GraphicEq, "还没有录音", "开始录音后，每 5 分钟会生成一段。") }
             byDay.forEach { (day, list) ->
                 item(key = "h$day") { DayHeader(dayLabel(day), "共 ${fmtDuration(list.sumOf { it.durationSec })}") }
-                items(list, key = { it.file.name }) { r -> RecordingCard(r, remote) }
+                items(list, key = { it.file.name }) { r -> RecordingCard(r, s) }
             }
         }
     }
 
     @Composable
-    private fun RecordingCard(r: Recording, remote: RemoteStatus) {
+    private fun RecordingCard(r: Recording, s: Status) {
         val selected = player.current?.file == r.file
         val tr = Transcripts.get(this@MainActivity, r.name)
         var wave by remember(r.file.name) { mutableStateOf(Waveforms.cached(r.file)) }
@@ -633,7 +722,7 @@ class MainActivity : ComponentActivity() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        StatusPill(statusLabel(r, tr, remote))
+                        StatusPill(statusLabel(r, tr, s))
                         place?.let { Meta(Icons.Rounded.Place, it.label, PlaceColor) }
                     }
                 }
@@ -968,40 +1057,211 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun ServerDialog() {
+    private fun SettingsDialog() {
         if (!editingServer) return
-        val initial = remember { Config.rawValues(this) }
-        var url by remember { mutableStateOf(initial.first) }
-        var token by remember { mutableStateOf(initial.second) }
-        var e2eeKey by remember { mutableStateOf(initial.third) }
-        val keyErr = e2eeKey.isNotBlank() && runCatching { Crypto.decodeKey(e2eeKey.trim()) }.isFailure
+        val initCloud = remember { Config.rawValues(this) }
+        val initAsr = remember { AsrConfig.rawValues(this) }
+        var selectedMode by remember { mutableStateOf(Config.mode(this)) }
+
+        var url by remember { mutableStateOf(initCloud.first) }
+        var token by remember { mutableStateOf(initCloud.second) }
+        var e2eeKey by remember { mutableStateOf(initCloud.third) }
+
+        var provider by remember { mutableStateOf(initAsr.provider) }
+        var asrUrl by remember { mutableStateOf(initAsr.baseUrl) }
+        var asrKey by remember { mutableStateOf(initAsr.apiKey) }
+        var asrAppId by remember { mutableStateOf(initAsr.appId) }
+        var asrModel by remember { mutableStateOf(initAsr.model) }
+        var showSecret by remember { mutableStateOf(false) }
+        var showVolcAdv by remember { mutableStateOf(initAsr.appId.isNotBlank() || (initAsr.baseUrl.isNotBlank() && initAsr.baseUrl != AsrProvider.VOLCENGINE.defaultUrl)) }
+        var probing by remember { mutableStateOf(false) }
+        var probeReport by remember { mutableStateOf<AsrProbeReport?>(null) }
+        val scope = rememberCoroutineScope()
+
+        val keyErr = selectedMode == WorkMode.CLOUD && e2eeKey.isNotBlank() &&
+            runCatching { Crypto.decodeKey(e2eeKey.trim()) }.isFailure
+        val draftAsr = AsrConfig(provider = provider, baseUrl = asrUrl, apiKey = asrKey, appId = asrAppId, model = asrModel)
+        val asrErr = if (selectedMode == WorkMode.DIRECT_ASR) draftAsr.validationError() else null
+
         AlertDialog(
             onDismissRequest = { editingServer = false },
-            title = { Text("服务器与端到端加密") },
+            title = { Text("转写与同步设置") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(url, { url = it }, singleLine = true, label = { Text("信箱地址") },
-                        placeholder = { Text("https://hark.example.com") })
-                    OutlinedTextField(token, { token = it }, singleLine = true, label = { Text("手机 Token (PHONE_TOKEN)") })
-                    OutlinedTextField(e2eeKey, { e2eeKey = it }, singleLine = true, isError = keyErr,
-                        label = { Text("端到端密钥 (E2EE_KEY)") },
-                        supportingText = {
-                            Text(if (keyErr) "需要 32 字节 Base64 或 64 位 hex"
-                                 else "与电脑端 worker.env 填同一把密钥，信箱服务器不保存它")
-                        })
-                    ActionChip(Icons.Rounded.Key, "随机生成一把新密钥") {
-                        val b = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-                        e2eeKey = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b)
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                        WorkMode.entries.forEachIndexed { idx, item ->
+                            SegmentedButton(
+                                selected = selectedMode == item,
+                                onClick = { selectedMode = item; probeReport = null },
+                                shape = SegmentedButtonDefaults.itemShape(index = idx, count = WorkMode.entries.size),
+                            ) { Text(item.label) }
+                        }
+                    }
+                    if (selectedMode == WorkMode.CLOUD) {
+                        Text(
+                            "录音经 AES-256-GCM 加密后上传盲信箱，由电脑桌面端或 hark worker 拉取转写并归档到 hark.db（供本地 hark CLI 与 AI 读取）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), singleLine = true,
+                            label = { Text("信箱地址") }, placeholder = { Text("https://hark.example.com") })
+                        OutlinedTextField(
+                            token, { token = it }, Modifier.fillMaxWidth(), singleLine = true,
+                            visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                            label = { Text("手机 Token (PHONE_TOKEN)") },
+                        )
+                        OutlinedTextField(
+                            e2eeKey, { e2eeKey = it }, Modifier.fillMaxWidth(), singleLine = true, isError = keyErr,
+                            visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                            label = { Text("端到端密钥 (E2EE_KEY)") },
+                            supportingText = {
+                                Text(if (keyErr) "需要 32 字节 Base64 或 64 位 hex"
+                                     else "与电脑端填同一把密钥，信箱服务器不保存它")
+                            },
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ActionChip(Icons.Rounded.Key, "随机生成新密钥") {
+                                val b = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                                e2eeKey = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b)
+                                showSecret = true
+                            }
+                            ActionChip(
+                                if (showSecret) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                if (showSecret) "隐藏密钥" else "显示密钥",
+                            ) { showSecret = !showSecret }
+                        }
+                    } else {
+                        Text(
+                            "手机录完直接调用所选 ASR 在本机出字（不连信箱）；7 天内切回「云端信箱同步」时，未上云录音会自动加密补传给电脑端。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            AsrProvider.entries.forEach { p ->
+                                FilterChip(
+                                    selected = provider == p,
+                                    onClick = {
+                                        val prev = provider
+                                        provider = p
+                                        if (asrUrl.isBlank() || asrUrl == prev.defaultUrl) asrUrl = p.defaultUrl
+                                        if (asrModel.isBlank() || asrModel == prev.defaultModel) asrModel = p.defaultModel
+                                        probeReport = null
+                                    },
+                                    label = { Text(p.shortLabel) },
+                                )
+                            }
+                        }
+                        when (provider) {
+                            AsrProvider.VOLCENGINE -> {
+                                OutlinedTextField(
+                                    asrKey, { asrKey = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                                    label = { Text("豆包语音 API Key / Access Token") },
+                                    supportingText = { Text("需使用「豆包语音控制台」Key，默认自带标点顺滑与对话人区分") },
+                                )
+                                OutlinedTextField(
+                                    asrModel, { asrModel = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    label = { Text("资源 ID (Resource ID)") },
+                                    placeholder = { Text(AsrProvider.VOLCENGINE.defaultModel) },
+                                )
+                                if (showVolcAdv) {
+                                    OutlinedTextField(
+                                        asrAppId, { asrAppId = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                        label = { Text("旧版 AppID（单 Key 鉴权留空）") },
+                                    )
+                                    OutlinedTextField(
+                                        asrUrl, { asrUrl = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                        label = { Text("接口地址") },
+                                        placeholder = { Text(AsrProvider.VOLCENGINE.defaultUrl) },
+                                    )
+                                }
+                            }
+                            AsrProvider.OPENAI -> {
+                                OutlinedTextField(
+                                    asrUrl, { asrUrl = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    label = { Text("接口根地址 (Base URL)") },
+                                    placeholder = { Text("https://api.openai.com/v1") },
+                                )
+                                OutlinedTextField(
+                                    asrKey, { asrKey = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                                    label = { Text("API Key（本地免密服务可留空）") },
+                                )
+                                OutlinedTextField(
+                                    asrModel, { asrModel = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    label = { Text("模型名称") },
+                                    placeholder = { Text("gpt-4o-mini-transcribe / whisper-large-v3-turbo") },
+                                )
+                            }
+                            AsrProvider.HARK_HTTP -> {
+                                OutlinedTextField(
+                                    asrUrl, { asrUrl = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    label = { Text("自建服务地址") },
+                                    placeholder = { Text("http://hark-asr.local:8787") },
+                                    supportingText = { Text("可通过局域网或 Tailscale 直连家里的转写服务") },
+                                )
+                                OutlinedTextField(
+                                    asrKey, { asrKey = it; probeReport = null }, Modifier.fillMaxWidth(), singleLine = true,
+                                    visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                                    label = { Text("Bearer Token（可选）") },
+                                )
+                            }
+                        }
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                enabled = !probing && asrErr == null,
+                                onClick = {
+                                    probing = true
+                                    probeReport = null
+                                    scope.launch {
+                                        probeReport = withContext(Dispatchers.IO) {
+                                            PhoneAsr.probe(this@MainActivity, draftAsr)
+                                        }
+                                        probing = false
+                                    }
+                                },
+                            ) { Text(if (probing) "正在实测…" else "测试转写连接") }
+                            ActionChip(
+                                if (showSecret) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                if (showSecret) "隐藏密钥" else "显示密钥",
+                            ) { showSecret = !showSecret }
+                            if (provider == AsrProvider.VOLCENGINE) {
+                                ActionChip(Icons.Rounded.Tune, if (showVolcAdv) "收起高级项" else "旧版 AppID") {
+                                    showVolcAdv = !showVolcAdv
+                                }
+                            }
+                        }
+                        probeReport?.let { rep ->
+                            Text(
+                                text = if (rep.ok) {
+                                    buildString {
+                                        append("✓ 连通 (${rep.latencyMs}ms")
+                                        if (rep.speakerCount > 0) append(" · 识别 ${rep.speakerCount} 位说话人")
+                                        append(")：")
+                                        append(rep.text.ifBlank { "（无文本）" }.take(60))
+                                    }
+                                } else {
+                                    "✕ ${rep.error}"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (rep.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
                 }
             },
             confirmButton = {
-                TextButton(enabled = !keyErr, onClick = {
+                TextButton(enabled = !keyErr && asrErr == null, onClick = {
                     Config.save(this, url, token, e2eeKey)
+                    AsrConfig.save(this, draftAsr)
+                    Config.setMode(this, selectedMode)
                     configVersion++
                     dataVersion++
                     editingServer = false
-                }) { Text("保存") }
+                }) { Text("保存并启用") }
             },
             dismissButton = { TextButton(onClick = { editingServer = false }) { Text("取消") } },
         )
@@ -1097,16 +1357,27 @@ class MainActivity : ComponentActivity() {
             leadingIcon = { Icon(icon, null, Modifier.size(AssistChipDefaults.IconSize)) })
     }
 
-    private fun statusLabel(r: Recording, tr: Transcript?, remote: RemoteStatus): String = when {
-        tr != null -> "已转写"
-        !r.hasAudio -> "录音已过期"
-        uploader.isSilent(r.file) -> "没有人声，未上传"
-        uploader.isUploaded(r.file) -> when {
-            remote.workerOnline && remote.workerPhase == "transcribing" && remote.workerCurrent == r.file.name -> "正在转写…"
-            remote.mailboxReachable == true && !remote.workerOnline -> "已加密上传 · 等家里上线"
-            else -> "排队转写中"
+    private fun statusLabel(r: Recording, tr: Transcript?, s: Status): String {
+        val mode = Config.mode(this)
+        val remote = s.remote
+        return when {
+            tr != null -> if (tr.text.isBlank()) "已转写（无有效语音）" else "已转写"
+            !r.hasAudio -> "录音已过期"
+            uploader.isSilent(r.file) -> if (mode == WorkMode.DIRECT_ASR) "没有人声，已跳过" else "没有人声，未上传"
+            mode == WorkMode.DIRECT_ASR -> when {
+                s.localAsrRunning == r.file.name -> "手机转写中…"
+                AsrConfig.load(this) == null -> "待配置直连 ASR"
+                uploader.isSkippedBadAudio(r.file) -> "音频异常，已跳过本机转写"
+                s.localAsrError != null -> "转写待重试"
+                else -> "排队手机转写"
+            }
+            uploader.isUploaded(r.file) -> when {
+                remote.workerOnline && remote.workerPhase == "transcribing" && remote.workerCurrent == r.file.name -> "正在转写…"
+                remote.mailboxReachable == true && !remote.workerOnline -> "已加密上传 · 等电脑上线"
+                else -> "排队转写中"
+            }
+            else -> "待加密上传"
         }
-        else -> "待加密上传"
     }
 
     private fun workerLabel(remote: RemoteStatus): String = when {
