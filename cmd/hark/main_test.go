@@ -93,6 +93,7 @@ func TestQueryCommandsAndInterspersedFlags(t *testing.T) {
 		{[]string{"search", "接口", "--json"}, 2},
 		{[]string{"search", "", "--speaker", "老王", "--json"}, 2},
 		{[]string{"timeline", "--json"}, 1},
+		{[]string{"timeline", "-date", "today", "-json"}, 1},
 		{[]string{"timeline", "--date", "yesterday", "--json"}, 1},
 		{[]string{"timeline", "--date", "all", "--limit", "2", "--offset", "1", "--json"}, 2},
 		{[]string{"speakers", "--json"}, 1},
@@ -111,7 +112,7 @@ func TestQueryCommandsAndInterspersedFlags(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.Contains(stdout, `"total": 0`) {
 		t.Fatalf("-- boundary: code=%d stdout=%s stderr=%s", code, stdout, stderr)
 	}
-	code, stdout, stderr = invoke("status", "--data-dir", dir, "--json")
+	code, stdout, stderr = invoke("status", "-data-dir", dir, "-json")
 	var st worker.ReadOnlyStats
 	if code != 0 || stderr != "" || json.Unmarshal([]byte(stdout), &st) != nil || st.TotalRecordings != 3 || st.LatestName != names[0] || st.SpeakerCount != 1 {
 		t.Fatalf("status: code=%d stdout=%s stderr=%s", code, stdout, stderr)
@@ -158,6 +159,7 @@ func TestConfigAndInvalidArguments(t *testing.T) {
 		{"unknown"}, {"get"}, {"search"}, {"search", "one", "two"}, {"status", "extra"},
 		{"timeline", "--date", "2026-02-30"}, {"timeline", "--limit", "0"}, {"search", "接口", "--offset", "-1"},
 		{"search", "接口", "--unknown"}, {"get", "name", "--json=bad"}, {"search", "接口", "--date"},
+		{"completion"}, {"completion", "invalid"}, {"completion", "zsh", "extra"},
 	} {
 		if code, stdout, stderr := invoke(args...); code != 2 || stdout != "" || stderr == "" {
 			t.Fatalf("invalid args %v: code=%d stdout=%s stderr=%s", args, code, stdout, stderr)
@@ -169,6 +171,15 @@ func TestHelpAndKeyGeneration(t *testing.T) {
 	for _, args := range [][]string{nil, {"--help"}, {"get", "--help"}, {"search", "接口", "--help"}, {"worker", "--help"}} {
 		if code, stdout, stderr := invoke(args...); code != 0 || stdout+stderr == "" {
 			t.Fatalf("help %v: %d %s %s", args, code, stdout, stderr)
+		}
+	}
+	if code, stdout, stderr := invoke("worker", "--help"); code != 0 || stderr != "" || !strings.Contains(stdout, "--once") || !strings.Contains(stdout, "--config") {
+		t.Fatalf("worker help missing flag docs: code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	for _, shell := range []string{"bash", "zsh", "fish", "powershell"} {
+		code, stdout, stderr := invoke("completion", shell)
+		if code != 0 || stderr != "" || !strings.Contains(stdout, "hark") {
+			t.Fatalf("completion %s: code=%d stderr=%s", shell, code, stderr)
 		}
 	}
 	for _, args := range [][]string{{"gen-key"}, {"worker", "-gen-key"}, {"worker", "--gen-key"}} {

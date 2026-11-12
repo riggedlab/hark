@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -17,18 +16,8 @@ import (
 	"time"
 
 	"github.com/riggedlab/hark/internal/worker"
+	"github.com/spf13/cobra"
 )
-
-const usage = `Hark 本地语音存档（查询命令只读）
-  hark status [--data-dir DIR] [--config PATH] [--json]
-  hark timeline [--date today|yesterday|7d|30d|all|YYYY-MM-DD] [--speaker WHO] [--limit 200] [--offset 0]
-  hark search <query> [--date 30d] [--speaker WHO] [--limit 30] [--offset 0]
-  hark get <name...>
-  hark speakers
-  hark worker [--config PATH] [--data-dir DIR] [--once] [--gen-key]
-  hark gen-key
-查询均支持 --data-dir、--config、--json；flag 可放在位置参数前后。
-`
 
 type timelineOutput struct {
 	DBExists bool                      `json:"db_exists"`
@@ -55,208 +44,465 @@ type getOutput struct {
 	Items    []worker.TranscriptDetail `json:"items"`
 }
 
+type exitError struct {
+	code int
+	err  error
+}
+
+func (e exitError) Error() string { return e.err.Error() }
+func (e exitError) Unwrap() error { return e.err }
+
+type queryFlags struct {
+	dataDir string
+	config  string
+	asJSON  bool
+}
+
+var legacyLongFlags = map[string]bool{
+	"data-dir": true,
+	"config":   true,
+	"json":     true,
+	"date":     true,
+	"speaker":  true,
+	"limit":    true,
+	"offset":   true,
+	"once":     true,
+	"gen-key":  true,
+	"help":     true,
+}
+
+var legacyValueFlags = map[string]bool{
+	"data-dir": true,
+	"config":   true,
+	"date":     true,
+	"speaker":  true,
+	"limit":    true,
+	"offset":   true,
+}
+
+// normalizeLegacyFlags rewrites single-dash known long flags (e.g. -json, -gen-key)
+// to --flag before "--", keeping compatibility with standard Go flag callers.
+func normalizeLegacyFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "--") {
+			out = append(out, arg)
+			name, _, hasEq := strings.Cut(arg[2:], "=")
+			if legacyValueFlags[name] && !hasEq && i+1 < len(args) {
+				i++
+				out = append(out, args[i])
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && len(arg) > 2 {
+			name, rest, hasEq := strings.Cut(arg[1:], "=")
+			if legacyLongFlags[name] {
+				if hasEq {
+					out = append(out, "--"+name+"="+rest)
+				} else {
+					out = append(out, "--"+name)
+					if legacyValueFlags[name] && i+1 < len(args) {
+						i++
+						out = append(out, args[i])
+					}
+				}
+				continue
+			}
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func addQueryFlags(cmd *cobra.Command, q *queryFlags) {
+	f := cmd.Flags()
+	f.StringVar(&q.dataDir, "data-dir", "", "本地存档目录（优先于环境变量和配置）")
+	f.StringVar(&q.config, "config", "", "配置文件路径（只读取 data_dir）")
+	f.BoolVar(&q.asJSON, "json", false, "输出标准 JSON")
+}
+
+func addFilterFlags(cmd *cobra.Command, f *worker.ArchiveFilter, defaultDate string, defaultLimit int) {
+	fl := cmd.Flags()
+	fl.StringVar(&f.DateRange, "date", defaultDate, "时间范围：today|yesterday|7d|30d|all|YYYY-MM-DD")
+	fl.StringVar(&f.SpeakerID, "speaker", "", "人物 ID 或显示名称（支持包含匹配）")
+	fl.IntVar(&f.Limit, "limit", defaultLimit, "最多返回的录音条数（正整数）")
+	fl.IntVar(&f.Offset, "offset", 0, "从最新录音起跳过的条数")
+}
+
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprint(stdout, usage)
-		return 0
+	var workerExit int
+	hasWorkerExit := false
+
+	root := &cobra.Command{
+		Use:           "hark",
+		Short:         "Hark 本地语音存档查询与后台同步工具",
+		Long:          "Hark 本地语音存档 CLI：查询子命令（status / timeline / search / get / speakers）均以纯只读方式打开本地 SQLite，不联网、不访问钥匙串。",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		Args:          cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
 	}
-	command, args := args[0], args[1:]
-	if command == "worker" {
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		return worker.RunCLI(ctx, args, stdout, stderr)
-	}
-	if command == "gen-key" {
-		if len(args) != 0 {
-			fmt.Fprintln(stderr, "用法: hark gen-key")
-			return 2
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs(normalizeLegacyFlags(args))
+
+	root.AddCommand(
+		newStatusCmd(stdout),
+		newTimelineCmd(stdout),
+		newSearchCmd(stdout),
+		newGetCmd(stdout),
+		newSpeakersCmd(stdout),
+		newWorkerCmd(stdout, stderr, &workerExit, &hasWorkerExit),
+		newGenKeyCmd(stdout, stderr, &workerExit, &hasWorkerExit),
+		newCompletionCmd(root, stdout),
+	)
+
+	if err := root.Execute(); err != nil {
+		var ee exitError
+		if errors.As(err, &ee) {
+			fmt.Fprintln(stderr, ee.err)
+			return ee.code
 		}
-		return worker.RunCLI(context.Background(), []string{"-gen-key"}, stdout, stderr)
-	}
-	if command != "status" && command != "timeline" && command != "search" && command != "get" && command != "speakers" {
-		fmt.Fprintf(stderr, "未知命令: %s\n%s", command, usage)
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	fs := flag.NewFlagSet("hark "+command, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dataDir := fs.String("data-dir", "", "本地存档目录（优先于环境变量和配置）")
-	conf := fs.String("config", "", "配置文件路径（只读取 data_dir）")
-	asJSON := fs.Bool("json", false, "输出标准 JSON")
-	f := worker.ArchiveFilter{}
-	if command == "timeline" || command == "search" {
-		date, limit := "today", 200
-		if command == "search" {
-			date, limit = "30d", 30
-		}
-		fs.StringVar(&f.DateRange, "date", date, "today|yesterday|7d|30d|all|YYYY-MM-DD")
-		fs.StringVar(&f.SpeakerID, "speaker", "", "人物 ID 或显示名称（支持包含匹配）")
-		fs.IntVar(&f.Limit, "limit", limit, "最多返回的录音条数（正整数）")
-		fs.IntVar(&f.Offset, "offset", 0, "从最新录音起跳过的条数")
+	if hasWorkerExit {
+		return workerExit
 	}
-	pos, err := parseInterspersed(fs, args)
-	if err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
-	}
-	if (command == "get" && len(pos) == 0) || (command == "search" && len(pos) != 1) ||
-		(command != "get" && command != "search" && len(pos) != 0) {
-		fmt.Fprintf(stderr, "命令参数不正确，运行 hark %s --help 查看用法\n", command)
-		return 2
-	}
-	if command == "timeline" || command == "search" {
-		if err := validateFilter(f); err != nil {
-			fmt.Fprintln(stderr, err)
-			return 2
-		}
-	}
-	if command == "search" {
-		f.Query = pos[0]
-	}
-	dir := worker.ResolveDataDir(*dataDir, *conf)
-	store, exists, err := worker.OpenReadOnlyStore(dir)
-	if err != nil {
-		fmt.Fprintf(stderr, "打开本地存档失败: %v\n", err)
-		return 1
-	}
-	if exists {
-		defer store.Close()
-	}
-	var payload any
-	var text strings.Builder
-	switch command {
-	case "status":
-		absDir, _ := filepath.Abs(dir)
-		st := worker.ReadOnlyStats{DBPath: filepath.Join(absDir, "hark.db")}
-		if exists {
-			st, err = store.ReadOnlyStats()
-		}
-		payload = st
-		if exists && err == nil {
-			fmt.Fprintf(&text, "本地存档: %s（%d 字节）\n录音 %d 条 · 时长 %.1fs · 语音 %.1fs · 人物 %d\n",
-				st.DBPath, st.DBSizeBytes, st.TotalRecordings, st.TotalDurationS, st.TotalSpeechS, st.SpeakerCount)
-			if st.LatestName != "" {
-				fmt.Fprintf(&text, "最新: %s · %s\n", st.LatestName, st.LatestStartedAt)
+	return 0
+}
+
+func newStatusCmd(stdout io.Writer) *cobra.Command {
+	var q queryFlags
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查看本地语音存档状态与统计概览",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			dir := worker.ResolveDataDir(q.dataDir, q.config)
+			store, exists, err := openReadOnly(dir)
+			if err != nil {
+				return err
 			}
-		}
-	case "timeline":
-		out := timelineOutput{DBExists: exists, Items: []worker.TranscriptDetail{}, Limit: f.Limit, Offset: f.Offset}
-		if exists {
-			out.Items, out.Total, err = store.Timeline(f)
-		}
-		payload = out
-		for _, d := range out.Items {
-			writeTranscript(&text, d, d.Segments)
-		}
-		writePageSummary(&text, out.Total, len(out.Items), f.Offset)
-	case "search":
-		out := searchOutput{DBExists: exists, SearchPage: worker.SearchPage{Items: []worker.SearchItem{}}, Limit: f.Limit, Offset: f.Offset}
-		if exists {
-			out.SearchPage, err = store.Search(f)
-		}
-		payload = out
-		for _, it := range out.Items {
-			writeTranscript(&text, worker.TranscriptDetail{Name: it.Name, StartedAt: it.StartedAt,
-				DurationS: it.DurationS, SpeechS: it.SpeechS, Text: it.Preview}, it.MatchedSegments)
-		}
-		writePageSummary(&text, out.Total, len(out.Items), f.Offset)
-	case "get":
-		if !exists {
-			err = errors.New("本地暂无录音存档，无法读取指定录音")
-			break
-		}
-		out := getOutput{DBExists: true, Items: []worker.TranscriptDetail{}}
-		for _, name := range pos {
-			if !strings.HasSuffix(name, ".opus") {
-				name += ".opus"
+			if exists {
+				defer store.Close()
 			}
-			var d worker.TranscriptDetail
-			d, err = store.GetDetail(name)
-			if errors.Is(err, sql.ErrNoRows) {
-				err = fmt.Errorf("录音不存在: %s", name)
+			absDir, _ := filepath.Abs(dir)
+			st := worker.ReadOnlyStats{DBPath: filepath.Join(absDir, "hark.db")}
+			if exists {
+				st, err = store.ReadOnlyStats()
+				if err != nil {
+					return queryErr(err)
+				}
+			}
+			var text strings.Builder
+			if exists {
+				fmt.Fprintf(&text, "本地存档: %s（%d 字节）\n录音 %d 条 · 时长 %.1fs · 语音 %.1fs · 人物 %d\n",
+					st.DBPath, st.DBSizeBytes, st.TotalRecordings, st.TotalDurationS, st.TotalSpeechS, st.SpeakerCount)
+				if st.LatestName != "" {
+					fmt.Fprintf(&text, "最新: %s · %s\n", st.LatestName, st.LatestStartedAt)
+				}
+			}
+			return emitOutput(stdout, q.asJSON, exists, st, &text)
+		},
+	}
+	addQueryFlags(cmd, &q)
+	return cmd
+}
+
+func newTimelineCmd(stdout io.Writer) *cobra.Command {
+	var q queryFlags
+	var f worker.ArchiveFilter
+	cmd := &cobra.Command{
+		Use:   "timeline",
+		Short: "按时间正序浏览指定日期范围的完整对话",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := validateFilter(f); err != nil {
+				return err
+			}
+			store, exists, err := openReadOnly(worker.ResolveDataDir(q.dataDir, q.config))
+			if err != nil {
+				return err
+			}
+			if exists {
+				defer store.Close()
+			}
+			out := timelineOutput{DBExists: exists, Items: []worker.TranscriptDetail{}, Limit: f.Limit, Offset: f.Offset}
+			if exists {
+				out.Items, out.Total, err = store.Timeline(f)
+				if err != nil {
+					return queryErr(err)
+				}
+			}
+			var text strings.Builder
+			for _, d := range out.Items {
+				writeTranscript(&text, d, d.Segments)
+			}
+			writePageSummary(&text, out.Total, len(out.Items), f.Offset)
+			return emitOutput(stdout, q.asJSON, exists, out, &text)
+		},
+	}
+	addQueryFlags(cmd, &q)
+	addFilterFlags(cmd, &f, "today", 200)
+	return cmd
+}
+
+func newSearchCmd(stdout io.Writer) *cobra.Command {
+	var q queryFlags
+	var f worker.ArchiveFilter
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "在本地语音存档中检索关键词或人物对话",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if err := validateFilter(f); err != nil {
+				return err
+			}
+			f.Query = args[0]
+			store, exists, err := openReadOnly(worker.ResolveDataDir(q.dataDir, q.config))
+			if err != nil {
+				return err
+			}
+			if exists {
+				defer store.Close()
+			}
+			out := searchOutput{DBExists: exists, SearchPage: worker.SearchPage{Items: []worker.SearchItem{}}, Limit: f.Limit, Offset: f.Offset}
+			if exists {
+				out.SearchPage, err = store.Search(f)
+				if err != nil {
+					return queryErr(err)
+				}
+			}
+			var text strings.Builder
+			for _, it := range out.Items {
+				writeTranscript(&text, worker.TranscriptDetail{
+					Name: it.Name, StartedAt: it.StartedAt,
+					DurationS: it.DurationS, SpeechS: it.SpeechS, Text: it.Preview,
+				}, it.MatchedSegments)
+			}
+			writePageSummary(&text, out.Total, len(out.Items), f.Offset)
+			return emitOutput(stdout, q.asJSON, exists, out, &text)
+		},
+	}
+	addQueryFlags(cmd, &q)
+	addFilterFlags(cmd, &f, "30d", 30)
+	return cmd
+}
+
+func newGetCmd(stdout io.Writer) *cobra.Command {
+	var q queryFlags
+	cmd := &cobra.Command{
+		Use:   "get <name...>",
+		Short: "读取一段或多段录音的完整转写与说话人分段",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			store, exists, err := openReadOnly(worker.ResolveDataDir(q.dataDir, q.config))
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return queryErr(errors.New("本地暂无录音存档，无法读取指定录音"))
+			}
+			defer store.Close()
+
+			out := getOutput{DBExists: true, Items: []worker.TranscriptDetail{}}
+			for _, name := range args {
+				if !strings.HasSuffix(name, ".opus") {
+					name += ".opus"
+				}
+				d, err := store.GetDetail(name)
+				if errors.Is(err, sql.ErrNoRows) {
+					return queryErr(fmt.Errorf("录音不存在: %s", name))
+				}
+				if err != nil {
+					return queryErr(err)
+				}
+				out.Items = append(out.Items, d)
+			}
+			var text strings.Builder
+			for _, d := range out.Items {
+				writeTranscript(&text, d, d.Segments)
+			}
+			return emitOutput(stdout, q.asJSON, true, out, &text)
+		},
+	}
+	addQueryFlags(cmd, &q)
+	return cmd
+}
+
+func newSpeakersCmd(stdout io.Writer) *cobra.Command {
+	var q queryFlags
+	cmd := &cobra.Command{
+		Use:   "speakers",
+		Short: "列出本地已建档人物及合并关系",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			store, exists, err := openReadOnly(worker.ResolveDataDir(q.dataDir, q.config))
+			if err != nil {
+				return err
+			}
+			if exists {
+				defer store.Close()
+			}
+			out := speakersOutput{DBExists: exists, Items: []worker.SpeakerInfo{}}
+			if exists {
+				out.Items, err = store.ListSpeakers()
+				if err != nil {
+					return queryErr(err)
+				}
+			}
+			var text strings.Builder
+			for _, sp := range out.Items {
+				fmt.Fprintf(&text, "- %s · %s · %.1fs", sp.ID, sp.Label, sp.WeightS)
+				if len(sp.MergedIDs) > 0 {
+					fmt.Fprintf(&text, " · 合并自 %s", strings.Join(sp.MergedIDs, ", "))
+				}
+				if sp.FirstSeen != "" {
+					fmt.Fprintf(&text, " · 首次 %s", sp.FirstSeen)
+				}
+				fmt.Fprintln(&text)
+				if sp.Sample != "" {
+					fmt.Fprintf(&text, "  样本: %s（%s %s）\n", sp.Sample, sp.SampleName, segmentTime(sp.SampleStart))
+				}
+			}
+			if len(out.Items) == 0 && exists {
+				fmt.Fprintln(&text, "暂无已建档人物")
+			}
+			return emitOutput(stdout, q.asJSON, exists, out, &text)
+		},
+	}
+	addQueryFlags(cmd, &q)
+	return cmd
+}
+
+func newWorkerCmd(stdout, stderr io.Writer, codeOut *int, hasExit *bool) *cobra.Command {
+	var confPath, dataDir string
+	var once, genKey bool
+	cmd := &cobra.Command{
+		Use:   "worker",
+		Short: "启动无界面后台拉取与转写引擎（兼容 hark-worker 全部参数）",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			var workerArgs []string
+			if confPath != "" {
+				workerArgs = append(workerArgs, "-config", confPath)
+			}
+			if dataDir != "" {
+				workerArgs = append(workerArgs, "-data-dir", dataDir)
+			}
+			if once {
+				workerArgs = append(workerArgs, "-once")
+			}
+			if genKey {
+				workerArgs = append(workerArgs, "-gen-key")
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			*hasExit = true
+			*codeOut = worker.RunCLI(ctx, workerArgs, stdout, stderr)
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&confPath, "config", "", "配置文件路径（默认 ~/.config/hark/config.json 或兼容 worker.env）")
+	f.StringVar(&dataDir, "data-dir", "", "本地 SQLite 存档目录（默认 ~/hark）")
+	f.BoolVar(&once, "once", false, "处理完当前信箱队列后立即退出")
+	f.BoolVar(&genKey, "gen-key", false, "生成一把新的 32 字节端到端加密密钥并退出")
+	return cmd
+}
+
+func newGenKeyCmd(stdout, stderr io.Writer, codeOut *int, hasExit *bool) *cobra.Command {
+	return &cobra.Command{
+		Use:   "gen-key",
+		Short: "生成一把新的 32 字节端到端加密共享密钥",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			*hasExit = true
+			*codeOut = worker.RunCLI(context.Background(), []string{"-gen-key"}, stdout, stderr)
+			return nil
+		},
+	}
+}
+
+func newCompletionCmd(root *cobra.Command, stdout io.Writer) *cobra.Command {
+	var noDesc bool
+	cmd := &cobra.Command{
+		Use:       "completion <bash|zsh|fish|powershell>",
+		Short:     "生成指定终端的命令自动补全脚本",
+		ValidArgs: []string{"bash", "zsh", "fish", "powershell"},
+		Args:      cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			var err error
+			switch args[0] {
+			case "bash":
+				err = root.GenBashCompletionV2(stdout, !noDesc)
+			case "zsh":
+				if noDesc {
+					err = root.GenZshCompletionNoDesc(stdout)
+				} else {
+					err = root.GenZshCompletion(stdout)
+				}
+			case "fish":
+				err = root.GenFishCompletion(stdout, !noDesc)
+			case "powershell":
+				if noDesc {
+					err = root.GenPowerShellCompletion(stdout)
+				} else {
+					err = root.GenPowerShellCompletionWithDesc(stdout)
+				}
+			default:
+				return fmt.Errorf("不支持的 shell: %s（可选 bash|zsh|fish|powershell）", args[0])
 			}
 			if err != nil {
-				break
+				return exitError{code: 1, err: err}
 			}
-			out.Items = append(out.Items, d)
-		}
-		payload = out
-		for _, d := range out.Items {
-			writeTranscript(&text, d, d.Segments)
-		}
-	case "speakers":
-		out := speakersOutput{DBExists: exists, Items: []worker.SpeakerInfo{}}
-		if exists {
-			out.Items, err = store.ListSpeakers()
-		}
-		payload = out
-		for _, sp := range out.Items {
-			fmt.Fprintf(&text, "- %s · %s · %.1fs", sp.ID, sp.Label, sp.WeightS)
-			if len(sp.MergedIDs) > 0 {
-				fmt.Fprintf(&text, " · 合并自 %s", strings.Join(sp.MergedIDs, ", "))
-			}
-			if sp.FirstSeen != "" {
-				fmt.Fprintf(&text, " · 首次 %s", sp.FirstSeen)
-			}
-			fmt.Fprintln(&text)
-			if sp.Sample != "" {
-				fmt.Fprintf(&text, "  样本: %s（%s %s）\n", sp.Sample, sp.SampleName, segmentTime(sp.SampleStart))
-			}
-		}
-		if len(out.Items) == 0 && exists {
-			fmt.Fprintln(&text, "暂无已建档人物")
-		}
+			return nil
+		},
 	}
+	cmd.Flags().BoolVar(&noDesc, "no-descriptions", false, "禁用补全项描述")
+	return cmd
+}
+
+func openReadOnly(dir string) (*worker.Store, bool, error) {
+	store, exists, err := worker.OpenReadOnlyStore(dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "查询失败: %v\n", err)
-		return 1
+		return nil, false, exitError{code: 1, err: fmt.Errorf("打开本地存档失败: %w", err)}
 	}
-	if *asJSON {
+	return store, exists, nil
+}
+
+func queryErr(err error) error {
+	return exitError{code: 1, err: fmt.Errorf("查询失败: %w", err)}
+}
+
+func emitOutput(stdout io.Writer, asJSON, exists bool, payload any, text *strings.Builder) error {
+	var err error
+	if asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
 		err = enc.Encode(payload)
 	} else {
 		if !exists {
 			text.Reset()
-			fmt.Fprintln(&text, "本地暂无录音存档。请先通过桌面端或 hark worker 同步录音，或用 --data-dir 指定已有存档。")
+			fmt.Fprintln(text, "本地暂无录音存档。请先通过桌面端或 hark worker 同步录音，或用 --data-dir 指定已有存档。")
 		}
 		_, err = io.WriteString(stdout, text.String())
 	}
 	if err != nil {
-		fmt.Fprintf(stderr, "输出失败: %v\n", err)
-		return 1
+		return exitError{code: 1, err: fmt.Errorf("输出失败: %w", err)}
 	}
-	return 0
-}
-
-// flag.FlagSet stops at the first positional argument. Separate flags and their
-// values first, preserving -- as the explicit positional-only boundary.
-func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
-	flags, pos := []string{}, []string{}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			pos = append(pos, args[i+1:]...)
-			break
-		}
-		if arg == "-" || !strings.HasPrefix(arg, "-") {
-			pos = append(pos, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		name, _, inline := strings.Cut(strings.TrimLeft(arg, "-"), "=")
-		if fl := fs.Lookup(name); fl != nil && !inline {
-			bf, isBool := fl.Value.(interface{ IsBoolFlag() bool })
-			if (!isBool || !bf.IsBoolFlag()) && i+1 < len(args) {
-				i++
-				flags = append(flags, args[i])
-			}
-		}
-	}
-	return pos, fs.Parse(flags)
+	return nil
 }
 
 func validateFilter(f worker.ArchiveFilter) error {
