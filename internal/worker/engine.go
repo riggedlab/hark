@@ -758,7 +758,11 @@ func newHTTPClient(cfg Config, timeout time.Duration) (*http.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取 SERVER_CA 失败: %w", err)
 		}
-		pool := x509.NewCertPool()
+		// 基于系统根证书池追加自定义证书，避免切回正规公网 HTTPS 域名后误拒公共 CA
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
 		if !pool.AppendCertsFromPEM(pemBytes) {
 			return nil, errors.New("解析 SERVER_CA PEM 证书失败")
 		}
