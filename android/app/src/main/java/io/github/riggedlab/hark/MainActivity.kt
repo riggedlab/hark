@@ -2190,7 +2190,7 @@ private fun EventCardView(
                                     color = if (lineActive) deck.signalRed else inlineDbColor,
                                 ),
                             ) {
-                                append(" ${l.seg.db.roundToInt()}dB ")
+                                append("\u00A0${l.seg.db.roundToInt()}dB ")
                             }
                         }
                         if (lineActive) pop()

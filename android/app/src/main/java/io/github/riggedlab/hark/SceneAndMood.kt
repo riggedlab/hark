@@ -147,10 +147,14 @@ internal object SceneAndMood {
             }
         }
 
-        // Pass 1: 扫描所有本地 .opus 音频（与 ASR 完全解耦，覆盖无人声、离线、云端同步与直连全部片段）
+        // Pass 1: 优先处理已有转写的对话录音（让「文字」页秒级出标），再后台补齐其余无人声/待转写 .opus 片段
+        val trDir = Transcripts.dir(ctx)
         val opusFiles = chunkDir.listFiles()
             ?.filter { Crypto.audioName.matches(it.name) && it.length() > 0 }
-            ?.sortedByDescending { it.name }
+            ?.sortedWith(
+                compareByDescending<File> { File(trDir, "${it.name}.json").exists() }
+                    .thenByDescending { it.name },
+            )
             ?: emptyList()
 
         for (opus in opusFiles) {
