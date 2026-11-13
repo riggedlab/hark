@@ -55,9 +55,9 @@ firmware/env.sh pyocd flash -t nrf54l -e sector "$PWD/firmware/build-recorder/re
 构建后可运行只读检查：`python3 firmware/recorder/verify_storage.py firmware/build-recorder/recorder/zephyr`，核对链接边界和 HEX 确实不含配对分区。
 
 ## App 前台实时状态
-「正在录上」来自 `ChunkRecorder` 的成功文件写入时间：音频每 50 帧成页并 flush，安静声明立即 flush；只收到包、重复旧包、写入异常或尚在内存中凑页都不能刷新写入时间。最近 2 秒没写入就显示「没有收到数据」。整段安静删除、5 分钟分段和上传前整段 VAD 的规则保持不变。
+「正在录上」来自 `ChunkRecorder` 的成功文件写入时间：音频每 50 帧成页并 flush，安静声明立即 flush；只收到包、重复旧包、写入异常或尚在内存中凑页都不能刷新写入时间。最近 2 秒没写入就显示「没有收到数据」。整段安静删除、按对话自然切段和上传前整段 VAD 的规则保持不变。
 
-Activity 可见时另开低优先级线程，用流式 `MediaCodec` 解 Opus；仅内存中的 5 帧分析队列，积压丢旧帧，超过 200ms 的分析帧丢弃，绝不等待分析才写文件。解码后的电平最多约 10Hz 刷新；独立 Silero session 使用同一 assets 模型，16kHz、512 + 64 采样、门限 0.5，最近 1 秒有过人声窗口才显示「检测到人声」。切后台释放解码器和该 session；分析不可用时仅保留写入状态，不影响录音。不保存、不记录实时分析音频和结果，也不实时转文字。
+录音服务运行期间另开低优先级线程，用流式 `MediaCodec` 解 Opus；仅内存中的 128 帧（约 2.56 秒）分析队列，积压丢旧帧，超过 200ms 的分析帧丢弃，绝不等待分析才写文件。解码后的电平最多约 10Hz 刷新；独立 Silero session 使用同一 assets 模型，16kHz、512 + 64 采样、门限 0.5，最近 1 秒有过人声窗口才显示「检测到人声」。录音服务停止时释放解码器和该 session；分析不可用时仅保留写入状态，不影响录音。不保存、不记录实时分析音频和结果，也不实时转文字。
 
 ## libopus
 - `lib/opus` 是 v1.5.2 源码，`lib/opus.cmake` 定义了编译清单和宏（FIXED_POINT、OPUS_ARM_INLINE_EDSP）
