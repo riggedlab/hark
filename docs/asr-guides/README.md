@@ -78,3 +78,25 @@ Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置�
 ## 实战调优经验
 
 - **[Apple Silicon 本地 Qwen3-ASR + 3D-Speaker 实战笔记](apple-silicon-mlx.md)**：包含全天随身录音场景下踩出来的 **VAD 25 秒合并防碎段**、**防复读幻觉熔断回退**、**工位远场与随身近场音量统一线性抬升**、**必须从原始波形提声纹** 4 条核心经验。
+
+## 无界面 `hark-worker` 的配置
+
+没有桌面端时，`hark-worker` 从 `~/.config/hark/config.json` 读取配置（也可以用 `-config` 指定路径）。最小示例：
+
+```json
+{
+  "server_url": "https://你的信箱地址",
+  "worker_token": "和信箱 .env 里的 WORKER_TOKEN 一致",
+  "e2ee_key": "./hark-worker -gen-key 输出的密钥，同时填到手机 App",
+  "data_dir": "~/hark",
+  "asr": {
+    "provider": "openai",
+    "base_url": "https://api.example.com/v1",
+    "api_key": "你的 Key",
+    "model": "模型名",
+    "language": "zh"
+  }
+}
+```
+
+`provider` 可选 `volcengine`、`openai`、`hark_http`，各自的 `base_url` 和 `model` 怎么填，见上文对应的方式。配置文件里有密钥，记得 `chmod 600`。

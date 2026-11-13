@@ -56,12 +56,10 @@ jobs:
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             notes="$(printf '%s\n' \
               '### 下载说明' \
-              '- **macOS 桌面端（含自动更新）**：下载 `hark-*.dmg`（同时支持 Apple Silicon 与 Intel；安装后支持后台自动检查与一键增量更新）。' \
-              '- **Windows 桌面端（含自动更新）**：下载 `hark-setup-*-amd64.exe` 安装运行。' \
-              '- **Linux 桌面端**：下载对应架构 `.deb`、`.rpm` 或 `.tar.gz`。' \
               '- **Android 手机端**：下载 `hark-*-android-arm64.apk` 直接覆盖安装（支持应用内「设备状态 → 检查更新」）。' \
               '- **盲信箱服务端**：Docker 镜像 `ghcr.io/riggedlab/hark-mailbox:'"${{ steps.meta.outputs.version }}"'` 或直接下载 `hark-mailbox-linux-*` 单二进制。' \
               '- **NAS / 无界面 Worker**：下载 `hark-worker-*` 单二进制。' \
+              '- **桌面端**：还没经过高频使用，暂不提供安装包，需要的话请按仓库 docs/development.md 从源码构建。' \
               '- **本地 AI Agent 查询 CLI**：`curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh`，或手动下载 `hark-cli-<系统>-<架构>` 单二进制。' \
               '')"
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
@@ -69,8 +67,11 @@ jobs:
               --notes "$notes" --generate-notes
           fi
 
+  # 桌面端还没经过高频使用，暂不随 Release 自动打包。
+  # 需要时在仓库 Settings → Variables 里设置 BUILD_DESKTOP=true 再打标签。
   desktop:
     needs: prepare
+    if: vars.BUILD_DESKTOP == 'true'
     name: Desktop (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     env:
@@ -269,6 +270,8 @@ jobs:
 
   publish:
     needs: [prepare, desktop, android, server-and-cli]
+    # desktop 被跳过时照常发布；任何一个任务失败则不发布。
+    if: ${{ !cancelled() && !failure() }}
     name: Generate Checksums & Publish Release
     runs-on: ubuntu-latest
     steps:

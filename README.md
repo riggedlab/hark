@@ -8,7 +8,7 @@ Hark 是一个开源的随身语音采集器，硬件代号 **DT-1**，可以全
 
 目前处于公开 alpha 阶段，手机端只支持 Android。
 
-> **当前重心是手机端。** 我们在家里的 Mac 上跑本地 ASR，效果不理想，所以优先把「手机直连转写」做扎实。电脑端（桌面端、`hark-worker`）和盲信箱能用，但**还没经过高频使用**，可能有不少粗糙的地方。
+> **当前重心是手机端。** 我们在家里的 Mac 上跑本地 ASR，效果不理想，所以优先把「手机直连转写」做扎实。电脑端（桌面端、`hark-worker`）和盲信箱能用，但**还没经过高频使用**，桌面端暂时也不提供安装包，可能有不少粗糙的地方。
 >
 > 遇到问题、有想法，欢迎[提 issue](https://github.com/riggedlab/hark/issues/new/choose)。
 
@@ -87,13 +87,10 @@ cp .env.example .env   # 填入两个不同的随机字符串：PHONE_TOKEN、WO
 docker compose up -d --build
 ```
 
-**② 安装电脑端**：从 [Releases](https://github.com/riggedlab/hark/releases) 下载对应系统的桌面端，都支持自动更新：
+**② 安装电脑端**：
 
-| 系统 | 文件 |
-|---|---|
-| macOS（Apple Silicon / Intel） | `hark-*.dmg` |
-| Windows | `hark-setup-*-amd64.exe` |
-| Linux | `hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz` |
+- **桌面端**（菜单栏常驻、存档检索导出、ASR 测连通）**还没经过高频使用**，目前不提供安装包。想试用请按 [docs/development.md](docs/development.md#从源码构建) 从源码构建。v0.1.1 的旧安装包仍在 Releases 里，但之后不再更新。
+- **无界面 `hark-worker`**：直接从 Releases 下载 `hark-worker-*` 单文件，适合 NAS 或 Linux 服务器常驻运行。
 
 装好后，打开桌面端，按顺序做三件事：
 
@@ -101,7 +98,7 @@ docker compose up -d --build
 2. 把密钥填到手机 App 的「服务器设置」。
 3. 在「ASR 接入」里选一个服务商，然后点「测试连接」，确认能连上。ASR 服务的接入说明见 [docs/asr-guides/](docs/asr-guides/)。
 
-不想开桌面端，也可以在 NAS 或 Linux 服务器上常驻运行无界面的 `hark-worker-*`：先运行 `-gen-key` 生成密钥，再直接运行，开始常驻拉取。
+用 `hark-worker` 的话：先运行 `./hark-worker -gen-key` 生成密钥，填到手机 App 和配置文件里，配置写法见 [docs/asr-guides/](docs/asr-guides/README.md#无界面-hark-worker-的配置)。然后直接运行 `./hark-worker`，它会常驻拉取。
 
 ### 4. （可选）接入你的 AI Agent
 
