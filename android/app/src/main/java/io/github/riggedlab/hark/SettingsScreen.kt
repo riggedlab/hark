@@ -108,6 +108,8 @@ internal fun SettingsScreen(
     var provider by remember { mutableStateOf(initAsr.provider) }
     var asrUrl by remember { mutableStateOf(initAsr.baseUrl) }
     var asrKey by remember { mutableStateOf(initAsr.apiKey) }
+    // 本次编辑中各服务商的密钥草稿，来回切换不丢输入
+    val draftKeys = remember { mutableStateMapOf<AsrProvider, String>() }
     var asrAppId by remember { mutableStateOf(initAsr.appId) }
     var asrModel by remember { mutableStateOf(initAsr.model) }
     var showAsrSecret by remember { mutableStateOf(false) }
@@ -324,6 +326,8 @@ internal fun SettingsScreen(
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 val prev = provider
                                 provider = next
+                                draftKeys[prev] = asrKey
+                                asrKey = draftKeys[next] ?: AsrConfig.savedKey(ctx, next)
                                 if (asrUrl.isBlank() || asrUrl == prev.defaultUrl) asrUrl = next.defaultUrl
                                 if (asrModel.isBlank() || asrModel == prev.defaultModel) asrModel = next.defaultModel
                                 probeReport = null
