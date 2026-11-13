@@ -14,7 +14,12 @@ data class Speaker(
     val firstSeen: String?,
     val sample: String?,
 ) {
-    val defaultName: String get() = "未命名 #" + id.removePrefix("spk_").trimStart('0')
+    val defaultName: String
+        get() = if (id.startsWith("pspk_")) {
+            "新说话人 #" + id.removePrefix("pspk_").trimStart('0').ifEmpty { "1" }
+        } else {
+            "未命名 #" + id.removePrefix("spk_").trimStart('0').ifEmpty { "1" }
+        }
 }
 
 /** 只填缺失字段，null 也可能是用户明确清空的新编辑，不能覆盖。 */
@@ -93,11 +98,23 @@ object Speakers {
     fun all(ctx: Context): Map<String, Speaker> {
         migrateLegacy(ctx)
         val mac = read(ctx, "speakers_mac").getJSONObject("items")
+        val local = read(ctx, "speakers_local").getJSONObject("items")
         val phone = read(ctx, "speakers_phone").getJSONObject("items")
-        return mac.keys().asSequence().associateWith { id ->
-            val meta = mac.getJSONObject(id)
+        val ids = LinkedHashSet<String>().apply {
+            mac.keys().forEach { add(it) }
+            local.keys().forEach { if (it.startsWith("pspk_") || !mac.has(it)) add(it) }
+        }
+        return ids.associateWith { id ->
+            val meta = mac.optJSONObject(id) ?: local.optJSONObject(id) ?: JSONObject()
+            val localMeta = local.optJSONObject(id)
             val edit = phone.optJSONObject(id) ?: JSONObject()
-            Speaker(id, edit.text("name"), edit.text("merged_into"), meta.text("first_seen"), meta.text("sample"))
+            Speaker(
+                id = id,
+                name = edit.text("name"),
+                mergedInto = edit.text("merged_into"),
+                firstSeen = meta.text("first_seen") ?: localMeta?.text("first_seen"),
+                sample = meta.text("sample") ?: localMeta?.text("sample"),
+            )
         }
     }
 

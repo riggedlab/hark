@@ -78,6 +78,9 @@ class Uploader(private val ctx: Context) {
     /** 手机本机直调三方 ASR 转写尚未出字的录音，返回 (成功数, 剩余数) */
     fun transcribePendingLocally(): Pair<Int, Int> = synchronized(uploadLock) {
         if (Config.mode(ctx) != WorkMode.DIRECT_ASR) return 0 to pendingCloud().size
+        if (Voiceprint.bootstrapIfNeeded(ctx)) {
+            AppState.update { it.copy(textVersion = it.textVersion + 1) }
+        }
         val cfg = AsrConfig.load(ctx) ?: return 0 to pendingLocalAsr().size
         var ok = 0
         for (f in pendingLocalAsr()) {
@@ -91,8 +94,9 @@ class Uploader(private val ctx: Context) {
             AppState.update { it.copy(localAsrRunning = f.name) }
             var abortBatch = false
             runCatching {
-                val json = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
-                Transcripts.save(ctx, json)
+                val rawJson = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
+                val enriched = Voiceprint.enrichTranscript(ctx, f, rawJson)
+                Transcripts.save(ctx, enriched)
             }.onSuccess {
                 ok++
                 badFileFailures.remove(f.name)

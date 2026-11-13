@@ -199,7 +199,7 @@ internal fun SettingsScreen(
                     ) {
                         ModeOptionTile(
                             title = "手机直连转写",
-                            desc = "手机直调豆包 / OpenAI 秒出字",
+                            desc = "豆包 / OpenAI 出字 + 本机声纹认人",
                             selected = selectedMode == WorkMode.DIRECT_ASR,
                             active = committedMode == WorkMode.DIRECT_ASR,
                             modifier = Modifier.weight(1f),
@@ -641,7 +641,7 @@ private fun DirectAsrConfigCard(
 
     SettingsGroupCard(
         title = "直连转写服务",
-        subtitle = "选择语音服务商并粘贴 Key，一键验证即可使用",
+        subtitle = "云端极速出字 + 手机本地声纹认人（声纹仅留本机，不上传）",
         trailing = {
             TextButton(
                 onClick = onToggleGuide,

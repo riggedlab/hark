@@ -82,9 +82,9 @@ object PhoneAsr {
         }
     }
 
-    private data class RawSeg(val start: Double, val end: Double, val text: String, val speaker: String? = null)
+    internal data class RawSeg(val start: Double, val end: Double, val text: String, val speaker: String? = null)
 
-    private fun buildTranscriptJson(
+    internal fun buildTranscriptJson(
         name: String,
         durationS: Double,
         fullText: String,
@@ -116,7 +116,9 @@ object PhoneAsr {
                 for (i in 0 until arr.length()) append(arr.getJSONObject(i).optString("text"))
             }
         }
+        var syntheticSegments = false
         if (arr.length() == 0 && finalText.isNotEmpty()) {
+            syntheticSegments = true
             arr.put(JSONObject().put("start", 0.0).put("end", round2(durationS)).put("text", finalText))
         }
         return JSONObject()
@@ -126,6 +128,7 @@ object PhoneAsr {
             .put("engine", engine)
             .put("model", model)
             .put("segments", arr)
+            .apply { if (syntheticSegments) put("synthetic_segments", true) }
     }
 
     // ─────────────────── 1. 火山引擎 · 豆包语音大模型极速版 ───────────────────

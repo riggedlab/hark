@@ -1,3 +1,6 @@
+import java.io.File
+import java.net.URL
+import java.security.MessageDigest
 import java.util.Properties
 
 // 公开编译默认不打包任何私人配置（用户在 App 内「服务器设置」填写）。
@@ -67,15 +70,66 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true; buildConfig = true }
+    androidResources {
+        noCompress += "onnx"
+    }
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/probeAssets"))
 }
 
-val syncProbeAsset by tasks.registering(Copy::class) {
-    from(rootProject.file("../internal/asr/probe.opus"))
-    into(layout.buildDirectory.dir("generated/probeAssets"))
+val speakerModelName = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+val speakerModelSha256 = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
+val speakerModelUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$speakerModelName"
+
+fun fileSha256(f: File): String {
+    val md = MessageDigest.getInstance("SHA-256")
+    f.inputStream().buffered().use { ins ->
+        val buf = ByteArray(65536)
+        while (true) {
+            val n = ins.read(buf)
+            if (n <= 0) break
+            md.update(buf, 0, n)
+        }
+    }
+    return md.digest().joinToString("") { "%02x".format(it) }
+}
+
+val syncProbeAsset by tasks.registering {
+    val probeSrc = rootProject.file("../internal/asr/probe.opus")
+    val outDir = layout.buildDirectory.dir("generated/probeAssets")
+    val userHome = System.getProperty("user.home")
+    val gradleHome = gradle.gradleUserHomeDir
+    inputs.file(probeSrc)
+    inputs.property("speakerModelSha256", speakerModelSha256)
+    outputs.dir(outDir)
+    doLast {
+        val dir = outDir.get().asFile.apply { mkdirs() }
+        probeSrc.copyTo(File(dir, "probe.opus"), overwrite = true)
+
+        val localCache = File(userHome, ".cache/hark/models/$speakerModelName")
+        val gradleCache = File(gradleHome, "caches/hark-models/$speakerModelName")
+        val modelFile = when {
+            localCache.exists() && fileSha256(localCache) == speakerModelSha256 -> localCache
+            gradleCache.exists() && fileSha256(gradleCache) == speakerModelSha256 -> gradleCache
+            else -> {
+                gradleCache.parentFile.mkdirs()
+                logger.lifecycle("Downloading 3D-Speaker CAM++ ONNX model ($speakerModelName)...")
+                val tmp = File(gradleCache.parentFile, "$speakerModelName.tmp")
+                URL(speakerModelUrl).openStream().use { ins ->
+                    tmp.outputStream().use { outs -> ins.copyTo(outs) }
+                }
+                val gotSha = fileSha256(tmp)
+                check(gotSha == speakerModelSha256) {
+                    "Speaker model SHA-256 mismatch: expected $speakerModelSha256, got $gotSha"
+                }
+                tmp.renameTo(gradleCache)
+                gradleCache
+            }
+        }
+        modelFile.copyTo(File(dir, "campplus_zh_16k.onnx"), overwrite = true)
+    }
 }
 
 tasks.named("preBuild") {

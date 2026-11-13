@@ -329,10 +329,11 @@ class MainActivity : ComponentActivity() {
         val textCount = Transcripts.dir(this).list()?.count { it.endsWith(".json") } ?: 0
         val marks = uploader.snapshotMarks()
         val spkMacMod = java.io.File(filesDir, "speakers_mac.json").lastModified()
+        val spkLocalMod = java.io.File(filesDir, "speakers_local.json").lastModified()
         val spkPhoneMod = java.io.File(filesDir, "speakers_phone.json").lastModified()
         val placeMod = java.io.File(filesDir, "places/places.json").lastModified()
         val fixMod = java.io.File(filesDir, "places/fixes.jsonl").lastModified()
-        return "$opusCount:$newestMod:$textCount:${marks.uploaded.size}:${marks.silent.size}:${marks.badAudio}:$spkMacMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
+        return "$opusCount:$newestMod:$textCount:${marks.uploaded.size}:${marks.silent.size}:${marks.badAudio}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
     }
 
     private fun resolveInRoster(id: String?, roster: Map<String, Speaker>): Speaker? {
@@ -385,7 +386,10 @@ class MainActivity : ComponentActivity() {
                 val localIdx = rawSpk?.removePrefix("other_")?.toIntOrNull()
                 val meta = when {
                     resolved != null -> Triple(resolved.name ?: resolved.defaultName, resolved.id, "global:${resolved.id}")
-                    localIdx != null && roster.isEmpty() -> Triple("对话人 ${localIdx + 1}", null, "local:${l.rec.name}:$localIdx")
+                    localIdx != null -> {
+                        val dispNum = if (localIdx <= 0) localIdx + 1 else localIdx
+                        Triple("对话人 $dispNum", null, "local:${l.rec.name}:$localIdx")
+                    }
                     rawSpk != null -> Triple(null, null, "raw:${l.rec.name}:$rawSpk")
                     else -> Triple(null, null, "unknown")
                 }
@@ -2333,7 +2337,7 @@ private fun PeoplePageView(
                 EmptyStateCard(
                     icon = Icons.Rounded.Group,
                     title = "尚无声纹人物档案",
-                    body = "当开启本地声纹识别后，识别到的说话人会自动归档在此，可起名或合并。",
+                    body = "录音中单人说话满 3 秒后，本机内置声纹模型会自动建档（豆包与 OpenAI 直连同样支持），可试听、起名或合并。",
                 )
             }
         } else if (unnamedCount >= 2) {

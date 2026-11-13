@@ -82,51 +82,58 @@ object Vad {
         return speechWins * WIN / 16000.0
     }
 
-    /** 解码成 16kHz 单声道 float。Android 的 Opus 解码器一般输出 48kHz，每 3 个采样取平均 */
-    private fun decode16k(f: File): FloatArray {
-        if (f.length() < 200) return FloatArray(0)
+    /** 解码成 16kHz 单声道 float（[-1, 1]）。Android 的 Opus 解码器一般输出 48kHz，每 3 个采样取平均 */
+    internal fun decode16k(f: File): FloatArray {
+        if (!f.exists() || f.length() < 200) return FloatArray(0)
         val ex = MediaExtractor()
-        ex.setDataSource(f.absolutePath)
-        ex.selectTrack(0)
-        val fmt = ex.getTrackFormat(0)
-        val codec = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME)!!)
-        codec.configure(fmt, null, null, 0)
-        codec.start()
-        var rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        var channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-        val out = ArrayList<Float>(16000 * 300)
-        var acc = 0.0; var accN = 0; var pos = 0.0
-        val info = MediaCodec.BufferInfo()
-        var inputDone = false; var outputDone = false
-        while (!outputDone) {
-            if (!inputDone) {
-                val i = codec.dequeueInputBuffer(10_000)
-                if (i >= 0) {
-                    val size = ex.readSampleData(codec.getInputBuffer(i)!!, 0)
-                    if (size < 0) { codec.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM); inputDone = true }
-                    else { codec.queueInputBuffer(i, 0, size, ex.sampleTime, 0); ex.advance() }
+        var codec: MediaCodec? = null
+        try {
+            ex.setDataSource(f.absolutePath)
+            ex.selectTrack(0)
+            val fmt = ex.getTrackFormat(0)
+            val c = MediaCodec.createDecoderByType(fmt.getString(MediaFormat.KEY_MIME)!!)
+            codec = c
+            c.configure(fmt, null, null, 0)
+            c.start()
+            var rate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            var channels = fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            val out = ArrayList<Float>(16000 * 60)
+            var acc = 0.0; var accN = 0; var pos = 0.0
+            val info = MediaCodec.BufferInfo()
+            var inputDone = false; var outputDone = false
+            while (!outputDone) {
+                if (!inputDone) {
+                    val i = c.dequeueInputBuffer(10_000)
+                    if (i >= 0) {
+                        val size = ex.readSampleData(c.getInputBuffer(i)!!, 0)
+                        if (size < 0) { c.queueInputBuffer(i, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM); inputDone = true }
+                        else { c.queueInputBuffer(i, 0, size, ex.sampleTime, 0); ex.advance() }
+                    }
+                }
+                val o = c.dequeueOutputBuffer(info, 10_000)
+                if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    rate = c.outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    channels = c.outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                } else if (o >= 0) {
+                    val sb = c.getOutputBuffer(o)!!.order(ByteOrder.LITTLE_ENDIAN).apply {
+                        position(info.offset); limit(info.offset + info.size) }.asShortBuffer()
+                    val step = rate / 16000.0
+                    while (sb.remaining() >= channels) {
+                        var v = 0.0
+                        repeat(channels) { v += sb.get() }
+                        acc += v / channels; accN++
+                        pos += 1.0
+                        if (pos >= step) { out.add((acc / accN / 32768.0).toFloat()); acc = 0.0; accN = 0; pos -= step }
+                    }
+                    c.releaseOutputBuffer(o, false)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
                 }
             }
-            val o = codec.dequeueOutputBuffer(info, 10_000)
-            if (o == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                rate = codec.outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                channels = codec.outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            } else if (o >= 0) {
-                val sb = codec.getOutputBuffer(o)!!.order(ByteOrder.LITTLE_ENDIAN).apply {
-                    position(info.offset); limit(info.offset + info.size) }.asShortBuffer()
-                val step = rate / 16000.0          // 每输出一个 16k 采样，消耗多少个原始采样
-                while (sb.remaining() >= channels) {
-                    var v = 0.0
-                    repeat(channels) { v += sb.get() }
-                    acc += v / channels; accN++
-                    pos += 1.0
-                    if (pos >= step) { out.add((acc / accN / 32768.0).toFloat()); acc = 0.0; accN = 0; pos -= step }
-                }
-                codec.releaseOutputBuffer(o, false)
-                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
-            }
+            return out.toFloatArray()
+        } finally {
+            runCatching { codec?.stop() }
+            runCatching { codec?.release() }
+            runCatching { ex.release() }
         }
-        codec.stop(); codec.release(); ex.release()
-        return out.toFloatArray()
     }
 }
