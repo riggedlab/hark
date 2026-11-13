@@ -461,6 +461,30 @@ internal object Voiceprint {
     }
 
     /**
+     * 为云端同步到达的转写补齐本机原音频的逐句分贝 "db" 与有效发声时长 "act_s"（若远端尚未提供），不改动其已有说话人标签。
+     */
+    fun annotateLoudnessIfMissing(opusFile: File, root: JSONObject): JSONObject = runCatching {
+        val segArr = root.optJSONArray("segments") ?: return root
+        if (segArr.length() == 0) return root
+        val needAny = (0 until segArr.length()).any { i ->
+            val o = segArr.getJSONObject(i)
+            (!o.has("db") || o.isNull("db")) && o.optDouble("end") > o.optDouble("start")
+        }
+        if (!needAny) return root
+        val pcm = Vad.decode16k(opusFile)
+        val energies = computeFrameEnergies16k(pcm)
+        if (energies.isEmpty()) return root
+        for (i in 0 until segArr.length()) {
+            val o = segArr.getJSONObject(i)
+            if (o.has("db") && !o.isNull("db")) continue
+            val stats = computeActiveSpeechStats(energies, 0.02, o.optDouble("start"), o.optDouble("end")) ?: continue
+            o.put("db", stats.first.toDouble())
+            o.put("act_s", stats.second.toDouble())
+        }
+        root
+    }.getOrDefault(root)
+
+    /**
      * 实时转写路径：仅执行毫秒级 JSON 版本检查（绝不扫描历史音频，绝不长时间占用 uploadLock），
      * 直接使用已就绪声纹原型完成逐句分贝计算与高精度声纹归属。
      */

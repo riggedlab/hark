@@ -96,7 +96,11 @@ object Sync {
                     require(Crypto.audioName.matches(name) && Crypto.itemId(cfg.e2eeKey, name) == item.getString("id")) {
                         "转写文件名或条目 ID 不匹配"
                     }
-                    Transcripts.save(ctx, text)
+                    val localOpus = File(RecorderService.chunkDir(ctx), name)
+                    val enrichedText = if (localOpus.exists()) {
+                        Voiceprint.annotateLoudnessIfMissing(localOpus, text)
+                    } else text
+                    Transcripts.save(ctx, enrichedText)
                     after = maxOf(after, item.getLong("seq"))
                 }
                 val slots = result.getJSONObject("slots")

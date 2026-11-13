@@ -280,6 +280,7 @@ class MainActivity : ComponentActivity() {
         uploader = Uploader(this)
         hasLocation = Places.hasPermission(this)
         Places.backfill(this)
+        Voiceprint.triggerBackgroundBootstrap(this)
         setContent { DitingTheme { RootHost() } }
     }
 
