@@ -41,6 +41,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -77,6 +78,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -340,6 +342,7 @@ internal enum class BaseChunkStatus {
     SILENT,
     FAR_SKIPPED,
     BAD_AUDIO,
+    ASR_TIMEOUT,
     UPLOADED,
     PENDING,
 }
@@ -515,7 +518,7 @@ class MainActivity : ComponentActivity() {
         val placeMod = java.io.File(filesDir, "places/places.json").lastModified()
         val fixMod = java.io.File(filesDir, "places/fixes.jsonl").lastModified()
         val sceneSig = SceneAndMood.sceneSignature(this)
-        return "$opusCount:$newestName:$textCount:$sceneSig:${marks.uploaded.size}:${marks.silent.size}:${marks.farSkipped.size}:${marks.badAudio}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
+        return "$opusCount:$newestName:$textCount:$sceneSig:${marks.uploaded.size}:${marks.silent.size}:${marks.farSkipped.size}:${marks.badAudio}:${marks.asrTimedOut}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
     }
 
     private fun resolveInRoster(id: String?, roster: Map<String, Speaker>): Speaker? {
@@ -526,15 +529,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun detectSelfSpeakerIds(roster: Map<String, Speaker>): Set<String> {
-        val explicit = roster.values
-            .filter { it.mergedInto == null && isSelfDisplayName(it.name) }
-            .map { it.id }
-            .toSet()
-        if (explicit.isNotEmpty()) return explicit
-        val fallback = roster.values.firstOrNull {
-            it.mergedInto == null && (it.id == "spk_001" || it.id == "spk_01") && it.name == null
-        }
-        return if (fallback != null) setOf(fallback.id) else emptySet()
+        return Speakers.selfIds(roster)
     }
 
     /**
@@ -1001,6 +996,7 @@ class MainActivity : ComponentActivity() {
                 r.name in marks.silent -> BaseChunkStatus.SILENT
                 r.name in marks.farSkipped -> BaseChunkStatus.FAR_SKIPPED
                 r.name in marks.badAudio -> BaseChunkStatus.BAD_AUDIO
+                r.name in marks.asrTimedOut -> BaseChunkStatus.ASR_TIMEOUT
                 r.name in marks.uploaded -> BaseChunkStatus.UPLOADED
                 else -> BaseChunkStatus.PENDING
             }
@@ -2469,6 +2465,10 @@ private fun DialogueBubbleRow(
     val deck = DeckTheme.colors
     val colors = MaterialTheme.colorScheme
     val isSelf = p.isSelf && !p.isBackgroundNoise
+    var labelLine by remember { mutableStateOf<LineUi?>(null) }
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val annotated = sentenceText(p.lines, highlightQuery)
+    SentenceLabelDialog(labelLine, onDismiss = { labelLine = null })
 
     val bubbleShape = if (isSelf) {
         RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp)
@@ -2543,8 +2543,6 @@ private fun DialogueBubbleRow(
             }
 
             Surface(
-                onClick = onTapBubble,
-                enabled = p.hasAnyAudio,
                 shape = bubbleShape,
                 color = bubbleBg,
                 border = if (!isSelf && !p.isBackgroundNoise) {
@@ -2557,9 +2555,16 @@ private fun DialogueBubbleRow(
             ) {
                 Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
                     Text(
-                        text = highlightMatches(p.text, highlightQuery),
+                        text = annotated,
+                        onTextLayout = { layoutResult = it },
                         style = MaterialTheme.typography.bodyLarge,
                         color = bubbleFg,
+                        modifier = Modifier.pointerInput(p.lines, annotated) {
+                            detectTapGestures(
+                                onTap = { if (p.hasAnyAudio) onTapBubble() },
+                                onLongPress = { offset -> labelLine = hitSentence(p.lines, annotated, layoutResult, offset) },
+                            )
+                        },
                     )
 
                     AnimatedVisibility(visible = active) {
@@ -3075,22 +3080,9 @@ private fun EditorialTurnItem(
     val deck = DeckTheme.colors
     var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
 
-    val annotated = remember(p.lines, highlightQuery, deck.signalRedContainer, deck.onSignalRedContainer) {
-        buildAnnotatedString {
-            p.lines.forEachIndexed { idx, l ->
-                pushStringAnnotation("line", idx.toString())
-                append(
-                    buildHighlightedText(
-                        l.seg.text.trim(),
-                        highlightQuery,
-                        deck.signalRedContainer,
-                        deck.onSignalRedContainer,
-                    ),
-                )
-                pop()
-            }
-        }
-    }
+    var labelLine by remember { mutableStateOf<LineUi?>(null) }
+    val annotated = sentenceText(p.lines, highlightQuery)
+    SentenceLabelDialog(labelLine, onDismiss = { labelLine = null })
 
     Column {
         Row(
@@ -3130,23 +3122,91 @@ private fun EditorialTurnItem(
                 p.isBackgroundNoise -> colors.onSurfaceVariant
                 else -> colors.onSurface
             },
-            modifier = Modifier.let { m ->
-                if (p.hasAnyAudio) {
-                    m.pointerInput(p.lines) {
-                        detectTapGestures { offset ->
-                            val charOff = layoutResult?.getOffsetForPosition(offset) ?: 0
-                            val hitIdx = annotated.getStringAnnotations("line", charOff, charOff)
-                                .firstOrNull()?.item?.toIntOrNull() ?: 0
-                            val target = p.lines.getOrNull(hitIdx)?.takeIf { it.rec.hasAudio }
-                                ?: p.lines.firstOrNull { it.rec.hasAudio }
-                                ?: return@detectTapGestures
-                            onSeekLine(target.rec, target.seg.start)
-                        }
-                    }
-                } else m
+            modifier = Modifier.pointerInput(p.lines, annotated) {
+                detectTapGestures(
+                    onTap = { offset ->
+                        val target = hitSentence(p.lines, annotated, layoutResult, offset)
+                        if (target != null && target.rec.hasAudio) onSeekLine(target.rec, target.seg.start)
+                    },
+                    onLongPress = { offset -> labelLine = hitSentence(p.lines, annotated, layoutResult, offset) },
+                )
             },
         )
     }
+}
+
+/** 每个文本范围对应原始单句，长按不会把整个对话段落一起标注。 */
+@Composable
+private fun sentenceText(lines: List<LineUi>, query: String): AnnotatedString {
+    val deck = DeckTheme.colors
+    return remember(lines, query, deck.signalRedContainer, deck.onSignalRedContainer) {
+        buildAnnotatedString {
+            lines.forEachIndexed { index, line ->
+                pushStringAnnotation("line", index.toString())
+                append(buildHighlightedText(line.seg.text.trim(), query, deck.signalRedContainer, deck.onSignalRedContainer))
+                pop()
+            }
+        }
+    }
+}
+
+private fun hitSentence(lines: List<LineUi>, text: AnnotatedString, layout: TextLayoutResult?, offset: Offset): LineUi? {
+    val char = layout?.getOffsetForPosition(offset) ?: return null
+    val index = text.getStringAnnotations("line", char, char).firstOrNull()?.item?.toIntOrNull() ?: return null
+    return lines.getOrNull(index)
+}
+
+@Composable
+private fun SentenceLabelDialog(line: LineUi?, onDismiss: () -> Unit) {
+    if (line == null) return
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var choosingPerson by remember(line) { mutableStateOf(false) }
+    var saving by remember(line) { mutableStateOf(false) }
+    var error by remember(line) { mutableStateOf<String?>(null) }
+    val named = remember(line) {
+        Speakers.all(ctx).values.filter { it.name != null && it.mergedInto == null }.sortedBy { it.name }
+    }
+    fun label(identity: String) {
+        saving = true
+        scope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    Voiceprint.labelSentence(ctx.applicationContext, line.rec.name, line.seg.start, line.seg.end, identity)
+                }
+                onDismiss()
+            } catch (e: Exception) {
+                error = e.message ?: "标注失败"
+                saving = false
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text(if (choosingPerson) "这是…" else "标注说话人") },
+        text = {
+            Column {
+                Text(line.seg.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(12.dp))
+                if (choosingPerson) {
+                    if (named.isEmpty()) Text("还没有已命名的人")
+                    Column(Modifier.heightIn(max = 280.dp).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+                        named.forEach { person ->
+                            TextButton(enabled = !saving, onClick = { label(person.id) }) { Text(person.name!!) }
+                        }
+                    }
+                } else {
+                    TextButton(enabled = !saving, onClick = { label(Voiceprint.SELF) }) { Text("这是我") }
+                    TextButton(enabled = !saving, onClick = { choosingPerson = true }) { Text("这是…（选已命名的人）") }
+                    TextButton(enabled = !saving, onClick = { label(Voiceprint.NOT_SELF) }) { Text("不是我") }
+                }
+                if (saving) Text("正在保存标注…")
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(enabled = !saving, onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 // ───────────────────── 底部 iOS 18 悬浮毛玻璃胶囊栏 + 搜索 + 迷你播放器 ─────────────────────
@@ -3741,6 +3801,7 @@ private fun resolveRecordingStatus(
     BaseChunkStatus.SILENT -> "安静留白"
     BaseChunkStatus.FAR_SKIPPED -> "远场/外放，已静默"
     BaseChunkStatus.BAD_AUDIO -> "音频异常，已跳过"
+    BaseChunkStatus.ASR_TIMEOUT -> "转写响应超时，已停止自动重试"
     BaseChunkStatus.UPLOADED -> when {
         mode == WorkMode.DIRECT_ASR -> when {
             sync.localAsrRunning == item.rec.name -> "正在整理…"

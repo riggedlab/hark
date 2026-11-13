@@ -6,13 +6,14 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.util.Base64
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.round
 
-enum class AsrFailureKind { AUTH_OR_CONFIG, BAD_AUDIO, TRANSIENT }
+enum class AsrFailureKind { AUTH_OR_CONFIG, BAD_AUDIO, READ_TIMEOUT, TRANSIENT }
 
 class PhoneAsrException(val kind: AsrFailureKind, message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
@@ -106,8 +107,8 @@ object PhoneAsr {
             val txt = s.text.trim()
             if (txt.isEmpty()) continue
             val obj = JSONObject()
-                .put("start", round2(s.start))
-                .put("end", round2(max(s.start, s.end)))
+                .put("start", s.start)
+                .put("end", max(s.start, s.end))
                 .put("text", txt)
             val mapped = s.speaker?.trim()?.let { speakerMap[it] }
             if (!mapped.isNullOrEmpty()) obj.put("speaker", mapped)
@@ -300,10 +301,16 @@ object PhoneAsr {
                 setRequestProperty("X-DashScope-SSE", "disable")
             }
             return try {
+                // 单独建连：连接超时仍可重试；发出音频后的读超时不能重发，避免重复计费。
+                conn.connect()
                 conn.outputStream.use { it.write(body) }
-                val code = conn.responseCode
-                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                code to stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                try {
+                    val code = conn.responseCode
+                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                    code to stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                } catch (e: SocketTimeoutException) {
+                    throw PhoneAsrException(AsrFailureKind.READ_TIMEOUT, "百炼读取超时，停止自动重试以避免重复计费", e)
+                }
             } finally {
                 conn.disconnect()
             }
@@ -332,8 +339,8 @@ object PhoneAsr {
                     "百炼鉴权失败 (HTTP $httpCode $apiCode)：请检查百炼 API Key、所属地域与接口地址是否匹配，并确认已开通模型 ${cfg.model}",
                 )
             }
-            if (apiCode == "Audio.AudioSilentError") {
-                return buildTranscriptJson(name, localDur, "", cfg.provider.id, cfg.model, emptyList())
+            if (apiCode.startsWith("Audio.") || apiCode.startsWith("InvalidFile.") || httpCode in listOf(413, 415)) {
+                throw PhoneAsrException(AsrFailureKind.BAD_AUDIO, "百炼音频异常 ($apiCode): ${apiMsg.take(200)}")
             }
             val parameterError = httpCode == 400 || httpCode == 422 || apiCode.startsWith("InvalidParameter") || apiCode == "UnsupportedParameter"
             if (enableSpeaker && parameterError && apiMsg.contains("diarization", ignoreCase = true)) {
@@ -347,7 +354,6 @@ object PhoneAsr {
             if (httpCode !in 200..299 || apiCode.isNotEmpty()) {
                 val kind = when {
                     httpCode == 429 || httpCode >= 500 -> AsrFailureKind.TRANSIENT
-                    apiCode.startsWith("Audio.") || httpCode in listOf(413, 415) -> AsrFailureKind.BAD_AUDIO
                     else -> classifyClientError("$apiCode $apiMsg")
                 }
                 throw PhoneAsrException(kind, "百炼返回 HTTP $httpCode ($apiCode, request_id=${data?.optString("request_id").orEmpty()}): ${apiMsg.take(200)}")
@@ -355,23 +361,66 @@ object PhoneAsr {
             if (data == null) throw PhoneAsrException(AsrFailureKind.TRANSIENT, "解析百炼响应失败")
             val output = data.optJSONObject("output") ?: JSONObject()
             val durS = data.optJSONObject("usage")?.optDouble("duration", 0.0)?.takeIf { it > 0 } ?: localDur
-            val sentences = output.optJSONArray("sentences") ?: JSONArray()
-            val items = if (sentences.length() > 0) sentences else JSONArray().apply {
-                output.optJSONObject("sentence")?.let { put(it) }
-            }
-            val segs = ArrayList<RawSeg>(items.length())
-            for (i in 0 until items.length()) {
-                val s = items.getJSONObject(i)
-                val txt = s.optString("text").trim()
-                if (txt.isEmpty()) continue
-                val speaker = s.opt("speaker_id")?.takeUnless { it == JSONObject.NULL }?.toString()?.trim()?.ifEmpty { null }
-                segs.add(RawSeg(s.optDouble("begin_time", 0.0) / 1000, s.optDouble("end_time", 0.0) / 1000, txt, speaker))
-            }
-            val fullText = output.optString("text").trim()
-            // A single output.sentence may only contain the last sentence of output.text.
-            if (sentences.length() == 0 && fullText.isNotEmpty() && segs.joinToString("") { it.text } != fullText) segs.clear()
+            val segs = dashScopeSegments(output, enableSpeaker)
+            val fullText = output.optString("text").trim().ifEmpty { output.optJSONObject("sentence")?.optString("text").orEmpty() }
             return buildTranscriptJson(name, durS, fullText, cfg.provider.id, cfg.model, segs)
         }
+    }
+
+    internal fun dashScopeSegments(output: JSONObject, enableSpeaker: Boolean): List<RawSeg> {
+        val sentences = output.optJSONArray("sentences")
+        val items = if (sentences != null && sentences.length() > 0) sentences else JSONArray().apply {
+            output.optJSONObject("sentence")?.let { put(it) }
+        }
+        if (!enableSpeaker || sentences == null || sentences.length() == 0) {
+            val words = JSONArray()
+            for (i in 0 until items.length()) {
+                val arr = items.getJSONObject(i).optJSONArray("words") ?: continue
+                for (j in 0 until arr.length()) words.put(arr.getJSONObject(j))
+            }
+            if (words.length() == 0) {
+                output.optJSONObject("sentence")?.optJSONArray("words")?.let { arr ->
+                    for (i in 0 until arr.length()) words.put(arr.getJSONObject(i))
+                }
+            }
+            return dashScopeWordSegments(words)
+        }
+        return (0 until items.length()).mapNotNull { i ->
+            val s = items.getJSONObject(i)
+            val txt = s.optString("text").trim()
+            if (txt.isEmpty()) null else RawSeg(
+                s.optDouble("begin_time", 0.0) / 1000,
+                s.optDouble("end_time", 0.0) / 1000,
+                txt,
+                s.opt("speaker_id")?.takeUnless { it == JSONObject.NULL }?.toString()?.trim()?.ifEmpty { null },
+            )
+        }
+    }
+
+    private fun dashScopeWordSegments(words: JSONArray): List<RawSeg> {
+        val segs = ArrayList<RawSeg>()
+        val text = StringBuilder()
+        var startMs = 0.0
+        var endMs = 0.0
+        fun flush() {
+            if (text.isNotBlank()) segs.add(RawSeg(startMs / 1000, endMs / 1000, text.toString().trim()))
+            text.setLength(0)
+        }
+        for (i in 0 until words.length()) {
+            val w = words.getJSONObject(i)
+            val word = w.optString("text")
+            val punctuation = w.optString("punctuation")
+            if (word.isBlank() && punctuation.isBlank()) continue
+            val begin = w.optDouble("begin_time", 0.0)
+            if (text.isNotEmpty() && begin - endMs > 800.0) flush()
+            if (text.isEmpty()) startMs = begin
+            endMs = w.optDouble("end_time", begin)
+            text.append(word)
+            if (punctuation.isNotEmpty() && !word.endsWith(punctuation)) text.append(punctuation)
+            if ((word + punctuation).any { it in "。！？!?；" }) flush()
+        }
+        flush()
+        return segs
     }
 
     // ─────────────────── 2. OpenAI 兼容接口 (/v1/audio/transcriptions) ───────────────────

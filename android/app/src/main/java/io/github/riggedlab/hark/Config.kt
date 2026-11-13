@@ -165,7 +165,7 @@ data class AsrConfig(
                 .putString("asr_app_id", cfg.appId.trim())
                 .putString("asr_model", cfg.model.trim())
                 .apply()
-            Uploader.clearLocalAsrFailures()
+            Uploader.clearLocalAsrFailures(ctx)
             AppState.update { it.copy(localAsrError = null) }
         }
     }

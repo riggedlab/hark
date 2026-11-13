@@ -4,6 +4,8 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.ui.test.*
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
 import org.json.JSONArray
@@ -11,6 +13,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,6 +31,12 @@ class UiWalkthroughTest {
 
     @get:Rule
     val rule = createAndroidComposeRule<MainActivity>()
+
+    @After
+    fun restoreTimelineStyle() {
+        // Activity 在 @Before 之前读取偏好，不能把上个用例的无框流留给下一个用例。
+        Config.setFeedStyle(ApplicationProvider.getApplicationContext(), FeedStyle.DIALOGUE)
+    }
 
     @Before
     fun seedRealisticData() {
@@ -67,6 +76,8 @@ class UiWalkthroughTest {
             ctx,
             JSONObject()
                 .put("name", rec1)
+                .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+                .put("sm_audio_ver", SceneAndMood.SCHEMA_VERSION)
                 .put("duration_s", 298.0)
                 .put("text", "所以感觉还是要先把插件接口收敛干净。好的没问题，周五下午三点过一遍硬件打样结构。")
                 .put(
@@ -87,6 +98,8 @@ class UiWalkthroughTest {
             ctx,
             JSONObject()
                 .put("name", rec2)
+                .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+                .put("sm_audio_ver", SceneAndMood.SCHEMA_VERSION)
                 .put("duration_s", 185.0)
                 .put("text", "备忘一下今晚跑通本地 hark timeline 查询。")
                 .put(
@@ -153,6 +166,7 @@ class UiWalkthroughTest {
     fun walkthroughAllScreensAndVerifyZeroLayoutJump() {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
+        rule.waitUntil(5_000) { rule.onNodeWithText("只看我说").isDisplayed() }
 
         // 1. 待机态模式 B「主客气泡流」：验证严格从近到远排序（16:40:10 张工回复在 16:40:01 之前发言上方，且均在 15:15 备忘上方）、无分贝数字、例外标签与底部胶囊基线
         rule.onNodeWithText("Hark").assertIsDisplayed()
@@ -264,6 +278,50 @@ class UiWalkthroughTest {
         rule.waitForIdle()
         rule.onAllNodesWithText("张工").onFirst().assertIsDisplayed()
         captureAllWindows("09-search-filtered")
+    }
+
+    @Test
+    fun longPressTargetsSingleSentenceInBothTimelineStyles() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val name = "20261112-164000.opus"
+        val file = File(Transcripts.dir(ctx), "$name.json")
+        val root = JSONObject(file.readText())
+        val old = root.getJSONArray("segments")
+        root.put("segments", JSONArray().put(old.getJSONObject(0))
+            .put(JSONObject().put("start", 9.6).put("end", 10.2).put("text", "第二句命中。").put("speaker", "spk_01").put("db", -19.6).put("proximity", "near"))
+            .put(old.getJSONObject(1)).put(old.getJSONObject(2)))
+        Transcripts.save(ctx, root)
+        AppState.update { it.copy(textVersion = it.textVersion + 1) }
+        rule.waitUntil(5_000) { rule.onAllNodesWithText("第二句命中。", substring = true).fetchSemanticsNodes().isNotEmpty() }
+
+        fun longPressSecondSentence() {
+            val node = rule.onNodeWithText("第二句命中。", substring = true)
+            val results = mutableListOf<TextLayoutResult>()
+            node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
+            val layout = results.single()
+            val offset = layout.layoutInput.text.text.indexOf("第二句命中。")
+            node.performTouchInput { longClick(layout.getBoundingBox(offset).center) }
+            rule.waitForIdle()
+            rule.onNodeWithText("这是我").assertIsDisplayed()
+            rule.onNodeWithText("不是我").assertIsDisplayed()
+            // Dialog 里的原文只能是命中的句子，不能是合并后的整个段落。
+            rule.onNodeWithText("第二句命中。").assertIsDisplayed()
+        }
+        longPressSecondSentence()
+        captureAllWindows("10-voice-label-dialogue")
+        rule.onNodeWithText("这是…（选已命名的人）").performClick()
+        rule.waitForIdle()
+        rule.onNode(hasText("张工") and hasAnyAncestor(isDialog())).assertIsDisplayed()
+        captureAllWindows("11-voice-label-person-picker")
+        rule.onNodeWithText("取消").performClick()
+        rule.onNodeWithContentDescription("设置").performClick()
+        rule.onNodeWithText("无框左轴流").performClick()
+        rule.onNodeWithContentDescription("返回").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("展开全篇 2 段 · 已静默 1 段背景声").performClick()
+        longPressSecondSentence()
+        captureAllWindows("12-voice-label-editorial")
+        rule.onNodeWithText("取消").performClick()
     }
 
     @Test

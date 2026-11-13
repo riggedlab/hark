@@ -9,13 +9,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
 import java.nio.FloatBuffer
-import java.time.format.DateTimeFormatter
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.log10
@@ -24,280 +26,134 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-/**
- * 手机端本地离线声纹识别 + 逐句有效响度（dBFS）引擎：
- * 1. 采用阿里 3D-Speaker CAM++ 中文 16kHz 192 维 ONNX 模型提取逐句（>= 2.0s）声纹（阈值 0.68、无漂移原型、同段互斥认领）；
- * 2. 对每句话按 20ms 帧计算剔除句中停顿后的有效发声响度（dBFS）与有效发声秒数（act_s），供人与 AI 判断同一场景内说话人相对远近；
- * 3. 声纹向量 100% 留存手机本地 files/speakers_local.json，绝不上传第三方云端。
- */
+/** CAM++ 中英增强版：逐句声纹留在手机，仅从用户注册/种子样本识别身份，不使用 ASR 说话人标签。 */
 internal object Voiceprint {
     private const val TAG = "Voiceprint"
-    const val MODEL_ASSET = "campplus_zh_16k.onnx"
-    const val MODEL_ID = "campplus_zh_16k"
+    const val MODEL_ASSET = "campplus_zh_en_adv_16k.onnx"
+    const val MODEL_ID = "campplus_zh_en_adv_16k"
     const val EMBED_DIM = 192
-    const val SCHEMA_VERSION = 2
+    const val SCHEMA_VERSION = 3
+    const val SELF = "__self__"
+    const val NOT_SELF = "__not_self__"
 
-    // 宁可把同一人保守标为「对话人 N」，绝不把他人误标为「我」
-    internal const val MATCH_THRESHOLD = 0.68f
-    internal const val IN_FILE_MERGE_SIM = 0.68f
-    private const val BOOTSTRAP_INLIER_SIM = 0.70f
-    private const val MIN_SPEECH_S = 2.0
-    private const val NEW_SPEAKER_MIN_S = 10.0
-    private const val MAX_EXTRACT_S = 14.0
-    private const val SHORT_INHERIT_MAX_DB_DIFF = 8.5f
-
+    // 2026-11-13 用户标注 391 条校准；与 tools/voiceprint/identify_me.py 的聚类规则一致，参数以任务说明为准。
+    internal const val MATCH_THRESHOLD = 0.65f
+    internal const val CLUSTER_DISTANCE = 0.6f
+    internal const val LONG_SENTENCE_S = 0.8
+    private const val MIN_SENTENCE_S = 0.3
+    private const val MIN_AUDIO_S = 0.25
+    private const val DB_WEIGHT = 0.01f
+    private const val DB_REFERENCE = -35f
+    private const val MISSING_DB = -50f
     private const val MIN_FLOOR_ENERGY = 1e-10
     private const val ACTIVE_GATE_MIN_DB = -62.0
     private const val ACTIVE_SPAN_DB = 15.0
     private const val MIN_CLAMP_DB = -65.0
 
-    private val FIRST_SEEN_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
     private val env by lazy { OrtEnvironment.getEnvironment() }
     @Volatile private var session: OrtSession? = null
     private val bgScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val bootstrapRunning = AtomicBoolean(false)
-    @Volatile private var bootstrapDone = false
+    private val backgroundLock = Mutex()
+    private val labelLock = Mutex()
+    private val scanRunning = AtomicBoolean(false)
+    private val cacheLock = Any()
 
     private fun localFile(ctx: Context) = File(ctx.filesDir, "speakers_local.json")
+    private fun enrollFile(ctx: Context) = File(ctx.filesDir, "voice_enroll.json")
+    private fun labelsFile(ctx: Context) = File(ctx.filesDir, "voice_labels.json")
+    private fun cacheFile(ctx: Context, name: String) =
+        File(File(ctx.filesDir, "vp_cache").apply { mkdirs() }, "$name.bin")
 
     private fun session(ctx: Context): OrtSession = session ?: synchronized(this) {
-        session ?: run {
-            val opts = OrtSession.SessionOptions().apply {
-                setIntraOpNumThreads(2)
-                setInterOpNumThreads(1)
-            }
-            val bytes = ctx.assets.open(MODEL_ASSET).use { it.readBytes() }
-            env.createSession(bytes, opts).also { session = it }
+        session ?: OrtSession.SessionOptions().use { opts ->
+            opts.setIntraOpNumThreads(2)
+            opts.setInterOpNumThreads(1)
+            env.createSession(ctx.assets.open(MODEL_ASSET).use { it.readBytes() }, opts).also { session = it }
         }
     }
 
-    /**
-     * 毫秒级纯 JSON 结构升级（绝不解码音频，可安全在任何路径调用）：
-     * - 清除旧版 v1 低阈值产生的质心向量，防止串人；
-     * - 保留用户在 speakers_phone.json 中改名或合并过的历史 pspk_ 元数据（first_seen / sample）；
-     * - 记录单调递增的 next_seq，严禁复用任何曾分配过的 pspk_ 编号。
-     */
+    /** 只清理旧模型的向量；完整保留旧 pspk 名册及用户改名/合并，供历史显示。 */
     internal fun migrateSchemaFast(ctx: Context): Boolean = synchronized(Speakers) {
-        val f = localFile(ctx)
-        if (!f.exists()) return false
-        val oldRoot = runCatching { JSONObject(f.readText()) }.getOrNull() ?: return false
-        val oldVer = oldRoot.optInt("version", 1)
-        if (oldVer >= SCHEMA_VERSION) return false
-
-        val phoneFile = File(ctx.filesDir, "speakers_phone.json")
-        val phoneItems = if (phoneFile.exists()) {
-            runCatching { JSONObject(phoneFile.readText()).optJSONObject("items") }.getOrNull() ?: JSONObject()
-        } else JSONObject()
-
-        val oldItems = oldRoot.optJSONObject("items") ?: JSONObject()
-        var maxPspkSeq = oldRoot.optInt("next_seq", 1) - 1
-        fun scanSeq(keys: Iterator<String>) {
-            while (keys.hasNext()) {
-                val k = keys.next()
-                if (k.startsWith("pspk_")) {
-                    val num = k.removePrefix("pspk_").toIntOrNull() ?: 0
-                    if (num > maxPspkSeq) maxPspkSeq = num
-                }
-            }
+        val file = localFile(ctx)
+        if (!file.exists()) return false
+        val root = JSONObject(file.readText())
+        if (root.optInt("version", 1) >= SCHEMA_VERSION) return false
+        val items = root.optJSONObject("items") ?: JSONObject()
+        for (id in items.keys()) {
+            val item = items.getJSONObject(id)
+            item.remove("centroid")
+            item.remove("weight")
+            item.remove("model")
         }
-        scanSeq(oldItems.keys())
-        scanSeq(phoneItems.keys())
-
-        // 保留用户曾显式改名/合并的历史条目及其全部合并目标链元数据（仅剥离旧版 v1 centroid 向量）
-        val keepIds = HashSet<String>()
-        for (id in phoneItems.keys()) {
-            keepIds.add(id)
-            var target = phoneItems.optJSONObject(id)?.optString("merged_into")?.takeIf { it.isNotBlank() }
-            val seen = HashSet<String>(4)
-            while (target != null && seen.add(target)) {
-                keepIds.add(target)
-                target = phoneItems.optJSONObject(target)?.optString("merged_into")?.takeIf { it.isNotBlank() }
-            }
-        }
-        val migratedItems = JSONObject()
-        for (id in oldItems.keys()) {
-            if (id !in keepIds) continue
-            val oldObj = oldItems.optJSONObject(id) ?: continue
-            val metaOnly = JSONObject()
-            oldObj.optString("first_seen").takeIf { it.isNotBlank() }?.let { metaOnly.put("first_seen", it) }
-            oldObj.optString("sample").takeIf { it.isNotBlank() }?.let { metaOnly.put("sample", it) }
-            migratedItems.put(id, metaOnly)
-        }
-
-        val newRoot = JSONObject()
-            .put("version", SCHEMA_VERSION)
-            .put("next_seq", maxPspkSeq + 1)
-            .put("items", migratedItems)
-        Sync.writeFile(f, newRoot.toString())
-        Log.i(TAG, "已升级声纹库至 v$SCHEMA_VERSION（清理旧质心，保留 ${migratedItems.length()} 条已编辑元数据，next_seq=${maxPspkSeq + 1}）")
+        root.put("version", SCHEMA_VERSION)
+        Sync.writeFile(file, root.toString())
         true
     }
 
-    /** 触发非阻塞后台声纹自举与全量环境音/心情扫描（在 uploadLock 之外异步运行，绝不阻塞实时新录音转写） */
     fun triggerBackgroundBootstrap(ctx: Context) {
         SceneAndMood.scheduleBackgroundScan(ctx)
-        if (bootstrapDone || !bootstrapRunning.compareAndSet(false, true)) return
-        val appCtx = ctx.applicationContext
+        if (!scanRunning.compareAndSet(false, true)) return
+        val app = ctx.applicationContext
         bgScope.launch {
             try {
-                if (bootstrapIfNeeded(appCtx)) {
-                    AppState.update { it.copy(textVersion = it.textVersion + 1) }
+                backgroundLock.withLock {
+                    if (bootstrapIfNeeded(app)) refreshUi()
                 }
-                bootstrapDone = true
-                SceneAndMood.scheduleBackgroundScan(appCtx)
+            } catch (e: Exception) {
+                Log.w(TAG, "声纹后台处理失败: ${e.message}")
             } finally {
-                bootstrapRunning.set(false)
+                scanRunning.set(false)
             }
         }
     }
 
-    /** 后台从电脑端已标注录音中为熟人（如 spk_001「我」）提取高纯度 Medoid 声纹原型 */
-    private fun bootstrapKnownSpeakersFromHistory(ctx: Context): Boolean {
+    private fun refreshUi() = AppState.update { it.copy(textVersion = it.textVersion + 1) }
+
+    fun bootstrapIfNeeded(ctx: Context): Boolean {
         var changed = migrateSchemaFast(ctx)
-        val chunkDir = RecorderService.chunkDir(ctx)
-        val roster = Speakers.all(ctx)
-        val existingPrototypes = loadPrototypes(ctx)
+        val imported = importSeeds(ctx)
+        changed = rescoreTranscripts(ctx, force = imported) || changed
+        return changed
+    }
 
-        val missingSpkIds = roster.values
-            .filter { !it.id.startsWith("pspk_") && it.mergedInto == null && it.id !in existingPrototypes }
-            .map { it.id }
-            .toSet()
-
-        if (missingSpkIds.isEmpty()) return changed
-
-        data class CandidateUtt(val emb: FloatArray, val durSec: Double, val db: Float)
-        val candidates = HashMap<String, MutableList<CandidateUtt>>()
-        val allNames = Transcripts.allNames(ctx).sortedDescending()
-
-        for (name in allNames) {
-            if (missingSpkIds.all { (candidates[it]?.size ?: 0) >= 10 }) break
-            val opus = File(chunkDir, name)
-            if (!opus.exists()) continue
-            val trFile = File(Transcripts.dir(ctx), "$name.json")
-            val rawRoot = runCatching { JSONObject(trFile.readText()) }.getOrNull() ?: continue
-            val engine = rawRoot.optString("engine")
-            if (engine == "volcengine" || engine == "openai" || engine == "dashscope") continue
-            val segArr = rawRoot.optJSONArray("segments") ?: continue
-
-            var pcm: FloatArray? = null
-            var energies: DoubleArray? = null
-            for (i in 0 until segArr.length()) {
-                val s = segArr.getJSONObject(i)
-                val rawSpk = s.optString("speaker")
-                if (rawSpk !in missingSpkIds) continue
-                val bucket = candidates.getOrPut(rawSpk) { ArrayList() }
-                if (bucket.size >= 10) continue
-                val st = s.optDouble("start")
-                val ed = s.optDouble("end")
-                val dur = ed - st
-                if (dur < 2.2 || s.optString("text").isBlank()) continue
-
-                if (pcm == null) {
-                    pcm = runCatching { Vad.decode16k(opus) }.getOrNull() ?: break
-                    energies = computeFrameEnergies16k(pcm)
+    /** 注册改变了全局质心，所以所有留有声纹缓存的日期均受影响；非我标注只影响当天。 */
+    private fun rescoreTranscripts(ctx: Context, force: Boolean, day: String? = null): Boolean {
+        var changed = false
+        for (name in Transcripts.allNames(ctx).sortedDescending()) {
+            if (day != null && !name.startsWith(day)) continue
+            try {
+                val updated = Transcripts.computeAndCommit(ctx, name) { root ->
+                    if (!force && root.optInt("vp_ver", 0) >= SCHEMA_VERSION) false
+                    else doEnrich(ctx, File(RecorderService.chunkDir(ctx), name), root)
                 }
-                val (segDb, _) = computeActiveSpeechStats(energies!!, 0.02, st, ed) ?: continue
-                if (segDb < -34.0f) continue
-                val (clip, clipSec) = sliceSpeakerAudio(pcm, listOf(Span(st, ed, "")))
-                val emb = extractEmbedding(ctx, clip) ?: continue
-                bucket.add(CandidateUtt(emb, clipSec, segDb))
-            }
-        }
-
-        for ((spkId, list) in candidates) {
-            if (list.isEmpty()) continue
-            val inliers = if (list.size == 1) {
-                list
-            } else {
-                var bestIdx = 0
-                var bestMeanSim = -1.0
-                for (i in list.indices) {
-                    var sumSim = 0.0
-                    for (j in list.indices) if (i != j) sumSim += cosine(list[i].emb, list[j].emb)
-                    val meanSim = sumSim / (list.size - 1)
-                    if (meanSim > bestMeanSim) {
-                        bestMeanSim = meanSim
-                        bestIdx = i
-                    }
+                if (updated) {
+                    changed = true
+                    refreshUi()
                 }
-                val medoid = list[bestIdx].emb
-                list.filter { cosine(it.emb, medoid) >= BOOTSTRAP_INLIER_SIM }
+            } catch (e: Exception) {
+                Log.w(TAG, "$name 声纹处理失败: ${e.message}")
             }
-            val totalSec = inliers.sumOf { it.durSec }
-            if (inliers.isEmpty() || totalSec < MIN_SPEECH_S) continue
-
-            val sumVec = FloatArray(EMBED_DIM)
-            for (u in inliers) {
-                val w = u.durSec.coerceIn(1.0, 6.0).toFloat()
-                for (k in 0 until EMBED_DIM) sumVec[k] += u.emb[k] * w
-            }
-            val avgDb = inliers.map { it.db }.average()
-            savePrototype(ctx, spkId, l2Normalize(sumVec), totalSec, null, null)
-            Log.i(
-                TAG,
-                "已为 $spkId 建立 v$SCHEMA_VERSION 高精度声纹原型 (${inliers.size}/${list.size} 句内点, ${"%.1f".format(totalSec)}s, 均值 ${"%.1f".format(avgDb)}dB)",
-            )
-            changed = true
         }
         return changed
     }
 
-    fun bootstrapIfNeeded(ctx: Context): Boolean {
-        return runCatching {
-            var changed = bootstrapKnownSpeakersFromHistory(ctx)
-            val chunkDir = RecorderService.chunkDir(ctx)
+    /** 输入与 sherpa-onnx 相同的 16kHz、[-1,1] 单声道采样；不裁边、不截断、不拼接句子。 */
+    fun extractEmbedding(ctx: Context, pcm16k: FloatArray): FloatArray? =
+        if (pcm16k.size < (KaldiFbank.SAMPLE_RATE * MIN_AUDIO_S).toInt()) null
+        else extractEmbedding(session(ctx), pcm16k)
 
-            val allSorted = Transcripts.allNames(ctx).sortedDescending()
-            var batchChanged = 0
-
-            for (name in allSorted) {
-                val opus = File(chunkDir, name)
-                if (!opus.exists()) continue
-                val trFile = File(Transcripts.dir(ctx), "$name.json")
-                if (!trFile.exists()) continue
-                val vpReady = runCatching { JSONObject(trFile.readText()).optInt("vp_ver", 0) >= SCHEMA_VERSION }.getOrDefault(true)
-                if (vpReady) continue
-
-                val updated = Transcripts.computeAndCommit(ctx, name) { rawJson ->
-                    if (rawJson.optInt("vp_ver", 0) >= SCHEMA_VERSION) return@computeAndCommit false
-                    doEnrich(ctx, opus, rawJson)
-                    true
-                }
-                if (updated) {
-                    changed = true
-                    batchChanged++
-                    if (batchChanged >= 5) {
-                        batchChanged = 0
-                        AppState.update { it.copy(textVersion = it.textVersion + 1) }
-                    }
-                }
-            }
-            changed
-        }.onFailure { e ->
-            Log.w(TAG, "bootstrap voiceprint skipped: ${e.message}")
-        }.getOrDefault(false)
-    }
-
-    /** 输入 16kHz 单声道归一化波形（[-1, 1]），输出 L2 归一化后的 192 维声纹向量 */
-    fun extractEmbedding(ctx: Context, pcm16k: FloatArray): FloatArray? {
-        if (pcm16k.size < (KaldiFbank.SAMPLE_RATE * MIN_SPEECH_S).toInt()) return null
-        val (numFrames, feats) = KaldiFbank.extractGlobalMeanNormalized(pcm16k)
-        if (numFrames < 40) return null
-        val ort = session(ctx)
-        val raw = OnnxTensor.createTensor(
-            env,
-            FloatBuffer.wrap(feats),
-            longArrayOf(1L, numFrames.toLong(), KaldiFbank.NUM_BINS.toLong()),
-        ).use { input ->
-            ort.run(mapOf("x" to input)).use { out ->
+    internal fun extractEmbedding(ort: OrtSession, pcm16k: FloatArray): FloatArray? {
+        if (pcm16k.size < (KaldiFbank.SAMPLE_RATE * MIN_AUDIO_S).toInt()) return null
+        val (frames, features) = KaldiFbank.extractGlobalMeanNormalized(pcm16k)
+        if (frames == 0) return null
+        val raw = OnnxTensor.createTensor(env, FloatBuffer.wrap(features), longArrayOf(1, frames.toLong(), KaldiFbank.NUM_BINS.toLong())).use { input ->
+            ort.run(mapOf("x" to input)).use { output ->
                 @Suppress("UNCHECKED_CAST")
-                val arr = out[0].value as Array<FloatArray>
-                arr[0]
+                (output[0].value as Array<FloatArray>)[0]
             }
         }
         return l2Normalize(raw)
     }
-
     internal fun l2Normalize(v: FloatArray): FloatArray {
         var sum = 0.0
         for (x in v) sum += x.toDouble() * x.toDouble()
@@ -391,481 +247,340 @@ internal object Voiceprint {
         endSec: Double,
     ): Float? = computeActiveSpeechStats(frameEnergies, frameDurSec, startSec, endSec)?.first
 
-    internal data class Span(val startSec: Double, val endSec: Double, val text: String) {
-        val durationSec: Double get() = (endSec - startSec).coerceAtLeast(0.0)
-    }
+    internal data class Span(val startSec: Double, val endSec: Double, val text: String)
+    internal data class Utterance(val index: Int, val duration: Double, val embedding: FloatArray, val db: Float = MISSING_DB)
+    internal data class Group(val members: MutableList<Int>, val embedding: FloatArray)
 
-    internal fun sliceSpeakerAudio(pcm16k: FloatArray, spans: List<Span>): Pair<FloatArray, Double> {
-        val sr = KaldiFbank.SAMPLE_RATE
-        val sorted = spans.filter { it.durationSec >= 0.45 }.sortedByDescending { it.durationSec }
-        val maxSamples = (MAX_EXTRACT_S * sr).toInt()
-        val picked = ArrayList<IntRange>()
-        var totalSamples = 0
-        var totalSpeechSec = 0.0
-        for (sp in spans) {
-            if (sp.durationSec > 0.1) totalSpeechSec += sp.durationSec
-        }
-        for (sp in sorted) {
-            if (totalSamples >= maxSamples) break
-            val trim = if (sp.durationSec >= 1.6) 0.10 else 0.0
-            val sIdx = ((sp.startSec + trim) * sr).toInt().coerceIn(0, pcm16k.size)
-            val eIdx = ((sp.endSec - trim) * sr).toInt().coerceIn(sIdx, pcm16k.size)
-            val len = eIdx - sIdx
-            if (len < (0.35 * sr).toInt()) continue
-            val take = min(len, maxSamples - totalSamples)
-            picked.add(sIdx until (sIdx + take))
-            totalSamples += take
-        }
-        if (totalSamples == 0) return FloatArray(0) to totalSpeechSec
-        val out = FloatArray(totalSamples)
-        var pos = 0
-        for (r in picked) {
-            val len = r.last - r.first + 1
-            System.arraycopy(pcm16k, r.first, out, pos, len)
-            pos += len
-        }
-        return out to totalSpeechSec
-    }
-
-    internal data class LocalTurnGroup(
-        val key: String,
-        val speechSec: Double,
-        val embedding: FloatArray,
-        val bestSample: String,
-    )
-
-    internal fun clusterInFile(
-        groups: List<LocalTurnGroup>,
-        mergeThreshold: Float = IN_FILE_MERGE_SIM,
-    ): List<Pair<List<String>, LocalTurnGroup>> {
-        val ordered = groups.sortedByDescending { it.speechSec }
-        val clusters = ArrayList<MutableList<LocalTurnGroup>>()
-        for (g in ordered) {
-            var targetCluster: MutableList<LocalTurnGroup>? = null
-            for (c in clusters) {
-                if (c.all { m -> cosine(g.embedding, m.embedding) >= mergeThreshold }) {
-                    targetCluster = c
-                    break
+    /** 平均连接层次聚类：簇间距离为所有句对余弦距离的平均值，短句不参与合并和组向量计算。 */
+    internal fun groupUtterances(utterances: List<Utterance>): List<Group> {
+        val long = utterances.filter { it.duration >= LONG_SENTENCE_S }
+        val clusters = Array<MutableList<Utterance>?>(long.size) { mutableListOf(long[it]) }
+        val distances = Array(long.size) { i -> FloatArray(long.size) { j -> 1f - cosine(long[i].embedding, long[j].embedding) } }
+        while (true) {
+            var a = -1
+            var b = -1
+            var best = CLUSTER_DISTANCE
+            for (i in clusters.indices) {
+                if (clusters[i] == null) continue
+                for (j in i + 1 until clusters.size) {
+                    if (clusters[j] != null && distances[i][j] < best) {
+                        best = distances[i][j]; a = i; b = j
+                    }
                 }
             }
-            if (targetCluster != null) targetCluster.add(g) else clusters.add(mutableListOf(g))
-        }
-        return clusters.map { members ->
-            val dim = members.first().embedding.size
-            val sum = FloatArray(dim)
-            var totalS = 0.0
-            var bestQuote = ""
-            val keys = ArrayList<String>(members.size)
-            for (m in members) {
-                keys.add(m.key)
-                val w = m.speechSec.toFloat().coerceAtLeast(0.5f)
-                totalS += m.speechSec
-                for (i in 0 until dim) sum[i] += m.embedding[i] * w
-                if (m.bestSample.length > bestQuote.length) bestQuote = m.bestSample
+            if (a < 0) break
+            val left = clusters[a]!!
+            val right = clusters[b]!!
+            for (k in clusters.indices) {
+                if (k == a || k == b || clusters[k] == null) continue
+                val d = (distances[a][k] * left.size + distances[b][k] * right.size) / (left.size + right.size)
+                distances[a][k] = d
+                distances[k][a] = d
             }
-            keys to LocalTurnGroup(
-                key = keys.first(),
-                speechSec = totalS,
-                embedding = l2Normalize(sum),
-                bestSample = bestQuote,
-            )
+            left.addAll(right)
+            clusters[b] = null
+        }
+        val groups = clusters.filterNotNull().map { members ->
+            val sum = FloatArray(EMBED_DIM)
+            for (u in members) for (k in sum.indices) sum[k] += u.embedding[k] * u.duration.toFloat()
+            Group(members.map { it.index }.toMutableList(), l2Normalize(sum))
+        }.toMutableList()
+        val longGroups = groups.toList()
+        for (u in utterances.filter { it.duration < LONG_SENTENCE_S }) {
+            val group = longGroups.maxByOrNull { cosine(u.embedding, it.embedding) }
+            if (group != null) group.members.add(u.index)
+            else groups.add(Group(mutableListOf(u.index), u.embedding))
+        }
+        return groups.sortedBy { it.members.min() }
+    }
+
+    internal fun identityScore(u: Utterance, group: FloatArray, centroid: FloatArray): Float {
+        // 2026-11-13 用户标注 391 条校准：随句长降低组权重，响度缺失按 -50 dBFS。
+        val wg = (0.8 - 0.6 * u.duration / 4).coerceIn(0.2, 0.8).toFloat()
+        return (1 - wg) * cosine(u.embedding, centroid) + wg * cosine(group, centroid) + DB_WEIGHT * (u.db - DB_REFERENCE)
+    }
+
+    internal fun assignSpeakers(
+        utterances: List<Utterance>,
+        centroids: Map<String, FloatArray>,
+        manual: Map<Int, String> = emptyMap(),
+        selfIds: Set<String> = emptySet(),
+    ): Map<Int, String> {
+        val assigned = LinkedHashMap<Int, String>()
+        val byIndex = utterances.associateBy { it.index }
+        var otherIndex = 0
+        for (group in groupUtterances(utterances)) {
+            var otherId: String? = null
+            for (index in group.members) {
+                val override = manual[index]
+                if (override != null && override != NOT_SELF) {
+                    assigned[index] = override
+                    continue
+                }
+                val u = byIndex.getValue(index)
+                val best = centroids.entries.asSequence()
+                    .filter { override != NOT_SELF || it.key !in selfIds }
+                    .map { it.key to identityScore(u, group.embedding, it.value) }
+                    .maxByOrNull { it.second }
+                assigned[index] = if (best != null && best.second >= MATCH_THRESHOLD) best.first else {
+                    otherId ?: "other_${++otherIndex}".also { otherId = it }
+                }
+            }
+        }
+        // 无声纹（过短、音频缺失）的句子仍遵从人工指定，不借用 ASR 标签。
+        for ((i, id) in manual) if (id != NOT_SELF) assigned[i] = id
+        return assigned
+    }
+
+    internal data class CachedSegment(val start: Double, val end: Double, val embedding: FloatArray?)
+
+    internal fun readCache(ctx: Context, name: String): List<CachedSegment>? = synchronized(cacheLock) {
+        val file = cacheFile(ctx, name)
+        if (!file.exists()) return null
+        runCatching {
+            DataInputStream(file.inputStream().buffered()).use { input ->
+                if (input.readInt() != SCHEMA_VERSION || input.readUTF() != MODEL_ID) return null
+                List(input.readInt()) {
+                    CachedSegment(input.readDouble(), input.readDouble(), if (input.readBoolean()) FloatArray(EMBED_DIM) { input.readFloat() } else null)
+                }
+            }
+        }.onFailure { Log.w(TAG, "声纹缓存 ${file.name} 无效: ${it.message}") }.getOrNull()
+    }
+
+    internal fun writeCache(ctx: Context, name: String, entries: List<CachedSegment>) = synchronized(cacheLock) {
+        val file = cacheFile(ctx, name)
+        val tmp = File(file.parentFile, ".${file.name}.tmp")
+        DataOutputStream(tmp.outputStream().buffered()).use { output ->
+            output.writeInt(SCHEMA_VERSION)
+            output.writeUTF(MODEL_ID)
+            output.writeInt(entries.size)
+            for (s in entries) {
+                output.writeDouble(s.start); output.writeDouble(s.end)
+                output.writeBoolean(s.embedding != null)
+                s.embedding?.forEach { output.writeFloat(it) }
+            }
+        }
+        check(tmp.renameTo(file)) { "保存声纹缓存失败" }
+    }
+
+    private fun slice(pcm: FloatArray, start: Double, end: Double): FloatArray {
+        val s = (start * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(0, pcm.size)
+        val e = (end * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(s, pcm.size)
+        return pcm.copyOfRange(s, e)
+    }
+
+    private fun cachedSegments(ctx: Context, opus: File, segments: JSONArray): List<CachedSegment>? {
+        val cache = readCache(ctx, opus.name).orEmpty()
+        val matching = (0 until segments.length()).map { i ->
+            val s = segments.getJSONObject(i)
+            cache.firstOrNull { it.start == s.optDouble("start") && it.end == s.optDouble("end") }
+        }
+        if (matching.all { it != null }) return matching.filterNotNull()
+        if (!opus.exists()) return null
+        val pcm = Vad.decode16k(opus)
+        val energies = computeFrameEnergies16k(pcm)
+        val entries = (0 until segments.length()).map { i ->
+            val s = segments.getJSONObject(i)
+            val start = s.optDouble("start")
+            val end = s.optDouble("end")
+            if (!s.has("db") || s.isNull("db")) {
+                computeActiveSpeechStats(energies, 0.02, start, end)?.let { (db, active) ->
+                    s.put("db", db.toDouble()).put("act_s", active.toDouble())
+                }
+            }
+            matching[i] ?: CachedSegment(start, end, if (end - start >= MIN_SENTENCE_S) extractEmbedding(ctx, slice(pcm, start, end)) else null)
+        }
+        writeCache(ctx, opus.name, entries)
+        return entries
+    }
+
+    private fun readObject(file: File): JSONObject = if (file.exists()) JSONObject(file.readText()) else JSONObject()
+    private fun spanKey(start: Double, end: Double) = "$start:$end"
+
+    private fun manualAssignments(ctx: Context, name: String, segments: JSONArray): Map<Int, String> = synchronized(Speakers) {
+        val labels = readObject(labelsFile(ctx)).optJSONObject(name) ?: return emptyMap()
+        (0 until segments.length()).mapNotNull { i ->
+            val s = segments.getJSONObject(i)
+            labels.optString(spanKey(s.optDouble("start"), s.optDouble("end"))).takeIf { it.isNotEmpty() }?.let { i to it }
+        }.toMap()
+    }
+
+    internal fun enrollmentCentroids(ctx: Context): Map<String, FloatArray> = synchronized(Speakers) {
+        val root = readObject(enrollFile(ctx))
+        root.keys().asSequence().mapNotNull { id ->
+            val samples = root.getJSONArray(id)
+            if (samples.length() == 0) return@mapNotNull null
+            val sum = FloatArray(EMBED_DIM)
+            for (i in 0 until samples.length()) {
+                val emb = samples.getJSONObject(i).getJSONArray("emb")
+                for (k in sum.indices) sum[k] += emb.getDouble(k).toFloat()
+            }
+            id to l2Normalize(sum)
+        }.toMap()
+    }
+
+    internal fun addEnrollment(ctx: Context, id: String, name: String, start: Double, end: Double, embedding: FloatArray, source: String) = synchronized(Speakers) {
+        val file = enrollFile(ctx)
+        val root = readObject(file)
+        val samples = root.optJSONArray(id) ?: JSONArray().also { root.put(id, it) }
+        val sample = JSONObject().put("file", name).put("start", start).put("end", end)
+            .put("emb", JSONArray(l2Normalize(embedding).map { it.toDouble() })).put("source", source)
+        for (i in 0 until samples.length()) {
+            val old = samples.getJSONObject(i)
+            if (old.optString("file") == name && old.optDouble("start") == start && old.optDouble("end") == end) {
+                // 重启重导入不增重，人工样本的来源不被 seed 覆盖。
+                if (old.optString("source") == "user" && source == "seed") return
+                samples.put(i, sample)
+                Sync.writeFile(file, root.toString())
+                return
+            }
+        }
+        samples.put(sample)
+        Sync.writeFile(file, root.toString())
+    }
+
+    /** 人工改判时撤回同一句以前的注册样本，避免旧判断继续影响质心。 */
+    private fun removeUserEnrollment(ctx: Context, name: String, start: Double, end: Double): Boolean = synchronized(Speakers) {
+        val file = enrollFile(ctx)
+        val root = readObject(file)
+        var removed = false
+        for (id in root.keys()) {
+            val samples = root.getJSONArray(id)
+            for (i in samples.length() - 1 downTo 0) {
+                val s = samples.getJSONObject(i)
+                if (s.optString("source") == "user" && s.optString("file") == name && s.optDouble("start") == start && s.optDouble("end") == end) {
+                    samples.remove(i)
+                    removed = true
+                }
+            }
+        }
+        if (removed) Sync.writeFile(file, root.toString())
+        removed
+    }
+
+    suspend fun labelSentence(ctx: Context, name: String, start: Double, end: Double, identity: String) = labelLock.withLock {
+        val id = if (identity == SELF) Speakers.selfIdentity(ctx) else identity
+        val emb = if (id == NOT_SELF) null else {
+            require(end - start >= MIN_SENTENCE_S) { "这句不足 0.3 秒，无法注册声纹" }
+            val entries = readCache(ctx, name).orEmpty()
+            entries.firstOrNull { it.start == start && it.end == end }?.embedding ?: run {
+                val opus = File(RecorderService.chunkDir(ctx), name)
+                check(opus.exists()) { "这句没有可用声纹，且原录音已过期" }
+                val extracted = extractEmbedding(ctx, slice(Vad.decode16k(opus), start, end))
+                    ?: error("这句音频不足 0.25 秒，无法注册声纹")
+                writeCache(ctx, name, entries.filterNot { it.start == start && it.end == end } + CachedSegment(start, end, extracted))
+                extracted
+            }
+        }
+        val removed = removeUserEnrollment(ctx, name, start, end)
+        if (emb != null) addEnrollment(ctx, id, name, start, end, emb, "user")
+        synchronized(Speakers) {
+            val file = labelsFile(ctx)
+            val root = readObject(file)
+            val labels = root.optJSONObject(name) ?: JSONObject().also { root.put(name, it) }
+            labels.put(spanKey(start, end), id)
+            Sync.writeFile(file, root.toString())
+        }
+        // 先让人工指定立刻生效，即使原录音已过期，随后再后台重打分。
+        Transcripts.computeAndCommit(ctx, name) { root -> applyAssignments(ctx, name, root, readCache(ctx, name).orEmpty()); true }
+        refreshUi()
+        bgScope.launch {
+            backgroundLock.withLock {
+                rescoreTranscripts(ctx, force = true, day = if (emb != null || removed) null else name.take(8))
+            }
         }
     }
 
-    /**
-     * 实时转写路径：仅执行毫秒级 JSON 版本检查与声纹/有效分贝计算（环境音与逐句心情放到独立后台队列，绝不阻塞 uploadLock）。
-     */
+    /** 文件全部成功导入才删除；部分失败保留，已成功样本通过 file/start/end 去重。 */
+    internal fun importSeeds(ctx: Context): Boolean {
+        val file = File(ctx.filesDir, "voice_seed.json")
+        if (!file.exists()) return false
+        val seed = JSONObject(file.readText())
+        var changed = false
+        var complete = true
+        for (person in seed.keys()) {
+            val id = if (person == "self") Speakers.selfIdentity(ctx) else Speakers.namedIdentity(ctx, person)
+            val samples = seed.getJSONArray(person)
+            for (i in 0 until samples.length()) {
+                val s = samples.getJSONObject(i)
+                val name = s.getString("file")
+                val start = s.getDouble("start")
+                val end = s.getDouble("end")
+                try {
+                    require(Crypto.audioName.matches(name)) { "种子录音文件名格式错误" }
+                    require(end - start >= MIN_SENTENCE_S) { "种子句子不足 0.3 秒" }
+                    val cached = readCache(ctx, name)?.firstOrNull { it.start == start && it.end == end }?.embedding
+                    val emb = cached ?: extractEmbedding(ctx, slice(Vad.decode16k(File(RecorderService.chunkDir(ctx), name)), start, end))
+                        ?: error("种子音频不足 0.25 秒")
+                    if (cached == null) {
+                        val entries = readCache(ctx, name).orEmpty().filterNot { it.start == start && it.end == end }
+                        writeCache(ctx, name, entries + CachedSegment(start, end, emb))
+                    }
+                    addEnrollment(ctx, id, name, start, end, emb, "seed")
+                    changed = true
+                } catch (e: Exception) {
+                    complete = false
+                    Log.w(TAG, "$name 种子导入失败: ${e.message}")
+                }
+            }
+        }
+        if (complete) check(file.delete()) { "删除已导入种子文件失败" }
+        return changed
+    }
+
+    private fun applyAssignments(ctx: Context, name: String, root: JSONObject, cache: List<CachedSegment>) {
+        val segments = root.optJSONArray("segments") ?: return
+        val manual = manualAssignments(ctx, name, segments)
+        val utterances = (0 until segments.length()).mapNotNull { i ->
+            val s = segments.getJSONObject(i)
+            val start = s.optDouble("start")
+            val end = s.optDouble("end")
+            val emb = cache.firstOrNull { it.start == start && it.end == end }?.embedding ?: return@mapNotNull null
+            Utterance(i, end - start, emb, s.optDouble("db", MISSING_DB.toDouble()).toFloat())
+        }
+        val roster = Speakers.all(ctx)
+        val selfRoots = Speakers.selfIds(roster)
+        val selfIds = roster.keys.filter { Speakers.resolve(roster, it)?.id in selfRoots }.toSet()
+        val assigned = assignSpeakers(utterances, enrollmentCentroids(ctx), manual, selfIds)
+        var other = assigned.values.mapNotNull { it.removePrefix("other_").toIntOrNull() }.maxOrNull() ?: 0
+        for (i in 0 until segments.length()) {
+            val s = segments.getJSONObject(i)
+            s.remove("speaker")
+            s.put("speaker", assigned[i] ?: "other_${++other}")
+            if (manual.containsKey(i)) s.put("vp_manual", manual.getValue(i)) else s.remove("vp_manual")
+            if (s.optString("proximity") == Proximity.MEDIA && Proximity.isProtectedSpeakerId(s.optString("speaker"), roster)) {
+                s.put("proximity", Proximity.NEAR)
+            }
+        }
+    }
+
     fun enrichTranscript(ctx: Context, opusFile: File, transcriptJson: JSONObject): JSONObject {
         migrateSchemaFast(ctx)
-        return runCatching {
-            doEnrich(ctx, opusFile, transcriptJson)
-        }.onFailure { e ->
-            Log.w(TAG, "voiceprint enrich ${opusFile.name} skipped: ${e.message}")
-        }.getOrDefault(transcriptJson)
+        try { doEnrich(ctx, opusFile, transcriptJson) }
+        catch (e: Exception) { Log.w(TAG, "${opusFile.name} 声纹失败: ${e.message}") }
+        return transcriptJson
     }
 
-    private fun finishEnrich(root: JSONObject): JSONObject {
-        root.put("vp_done", true)
-        root.put("vp_ver", SCHEMA_VERSION)
-        return root
+    private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject): Boolean {
+        val segments = root.optJSONArray("segments")
+        if (segments == null || segments.length() == 0 || root.optBoolean("synthetic_segments", false)) {
+            root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
+            return true
+        }
+        val cache = cachedSegments(ctx, opusFile, segments) ?: return false
+        applyAssignments(ctx, opusFile.name, root, cache)
+        root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
+        return true
     }
 
-    private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject): JSONObject {
-        val t0 = System.currentTimeMillis()
-        val segArr = root.optJSONArray("segments")
-        if (root.optBoolean("synthetic_segments", false) || segArr == null || segArr.length() == 0) {
-            return finishEnrich(root)
-        }
-        val pcm = runCatching { Vad.decode16k(opusFile) }.getOrNull() ?: return finishEnrich(root)
-
-        val proxProfile = Proximity.buildProfile(pcm)
-        val roster = runCatching { Speakers.all(ctx) }.getOrDefault(emptyMap())
-        val nSegs = segArr.length()
-        val segDbs = arrayOfNulls<Float>(nSegs)
-        val segAcoustics = arrayOfNulls<Proximity.SegmentAcoustic>(nSegs)
-        val segStarts = DoubleArray(nSegs)
-        val segEnds = DoubleArray(nSegs)
-        val segSpks = arrayOfNulls<String>(nSegs)
-
-        for (i in 0 until nSegs) {
-            val o = segArr.getJSONObject(i)
-            val st = o.optDouble("start")
-            val ed = o.optDouble("end")
-            segStarts[i] = st
-            segEnds[i] = ed
-            segSpks[i] = o.optString("speaker").takeIf { it.isNotBlank() }
-            val ac = proxProfile.measureSegment(st, ed)
-            if (ac != null) {
-                segAcoustics[i] = ac
-                segDbs[i] = ac.activeDb
-                o.put("db", (ac.activeDb * 10f).roundToInt() / 10.0)
-                o.put("act_s", (ac.activeSec * 100f).roundToInt() / 100.0)
-                o.put("snr_db", (ac.snrDb * 10f).roundToInt() / 10.0)
-            }
-        }
-
-        val (chunkMedHf, chunkP90Db) = Proximity.chunkReferenceStats(segAcoustics.toList())
-        val segProximities = arrayOfNulls<String>(nSegs)
-        for (i in 0 until nSegs) {
-            val ac = segAcoustics[i] ?: continue
-            val st = segStarts[i]
-            val ed = segEnds[i]
-            val cProbs = if (ed - st >= 0.7) {
-                val padS = ((st - 0.15).coerceAtLeast(0.0) * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(0, pcm.size)
-                val padE = (min(ed + 0.25, st + 5.0) * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(padS, pcm.size)
-                if (padE - padS >= KaldiFbank.SAMPLE_RATE / 2) {
-                    runCatching { SceneAndMood.inferCedProbs(ctx, pcm, padS, padE) }.getOrNull()
-                } else null
-            } else null
-            segProximities[i] = Proximity.classifySegment(
-                acoustic = ac,
-                chunkMedianHfLfDb = chunkMedHf,
-                chunkP90Db = chunkP90Db,
-                cedProbs = cProbs,
-                isProtectedSpeaker = Proximity.isProtectedSpeakerId(segSpks[i], roster),
-            )
-        }
-        Proximity.smoothShortSegments(segStarts, segEnds, segSpks, segAcoustics, segProximities)
-        for (i in 0 until nSegs) {
-            segProximities[i]?.let { segArr.getJSONObject(i).put("proximity", it) }
-        }
-
-        val engine = root.optString("engine")
-        val isPhoneDirect = engine == "volcengine" || engine == "openai" || engine == "dashscope"
-
-        if (!isPhoneDirect) {
-            val hasMacGlobal = (0 until segArr.length()).any { i ->
-                segArr.getJSONObject(i).optString("speaker").startsWith("spk_")
-            }
-            if (hasMacGlobal) {
-                return finishEnrich(root)
-            }
-        }
-
-        if (pcm.size < (KaldiFbank.SAMPLE_RATE * MIN_SPEECH_S).toInt()) {
-            return finishEnrich(root)
-        }
-
-        val hasDiarizedLabels = (0 until segArr.length()).any { i ->
-            segArr.getJSONObject(i).optString("speaker").isNotBlank()
-        }
-
-        // 2. 仅对单句时长 >= 2.0s 的句子独立提取声纹（绝不跨短句拼接，彻底阻断混人连带误认）
-        val extractedUtts = ArrayList<LocalTurnGroup>()
-        val rawLabels = arrayOfNulls<String>(segArr.length())
-
-        for (i in 0 until segArr.length()) {
-            val o = segArr.getJSONObject(i)
-            val txt = o.optString("text").trim()
-            if (txt.isEmpty()) continue
-            val rawSpk = o.optString("speaker").takeIf { it.isNotBlank() }
-            rawLabels[i] = rawSpk
-            val st = o.optDouble("start")
-            val ed = o.optDouble("end")
-            val dur = ed - st
-            if (!hasDiarizedLabels && dur > 25.0) continue
-            if (dur < MIN_SPEECH_S) continue
-
-            val (clip, clipSec) = sliceSpeakerAudio(pcm, listOf(Span(st, ed, txt)))
-            if (clipSec < MIN_SPEECH_S || clip.isEmpty()) continue
-            val emb = extractEmbedding(ctx, clip) ?: continue
-            extractedUtts.add(
-                LocalTurnGroup(
-                    key = "u_$i",
-                    speechSec = clipSec,
-                    embedding = emb,
-                    bestSample = txt.take(80),
-                ),
-            )
-        }
-
-        if (extractedUtts.isEmpty()) {
-            if (isPhoneDirect) {
-                var fIdx = 0
-                val localMap = HashMap<String, String>()
-                for (i in 0 until segArr.length()) {
-                    val o = segArr.getJSONObject(i)
-                    val cur = o.optString("speaker")
-                    if (cur.startsWith("spk_") || cur.startsWith("pspk_")) {
-                        o.put("speaker", localMap.getOrPut(cur) { fIdx++; "other_$fIdx" })
-                    }
-                }
-            }
-            return finishEnrich(root)
-        }
-
-        val nearUttKeys = HashSet<String>()
-        for (i in 0 until nSegs) {
-            if (segProximities[i] == null || segProximities[i] == Proximity.NEAR) {
-                nearUttKeys.add("u_$i")
-            }
-        }
-        val clusters = clusterInFile(extractedUtts, IN_FILE_MERGE_SIM)
-        val firstSeenStr = Recordings.parseStart(opusFile)?.format(FIRST_SEEN_FMT)
-        val keyToSpeaker = matchAndPersistClusters(
-            ctx = ctx,
-            clusters = clusters,
-            firstSeen = firstSeenStr,
-            allowPersistPrototypes = hasDiarizedLabels,
-            eligiblePersistKeys = nearUttKeys,
-        )
-
-        val speakerDbAcc = HashMap<String, MutableList<Float>>()
-        val rawTagAssignedSet = HashMap<String, MutableSet<String>>()
-        val segAssigned = arrayOfNulls<String>(segArr.length())
-
-        for (i in 0 until segArr.length()) {
-            val direct = keyToSpeaker["u_$i"]
-            if (direct != null) {
-                segAssigned[i] = direct
-                segDbs[i]?.let { speakerDbAcc.getOrPut(direct) { ArrayList() }.add(it) }
-                rawLabels[i]?.let { rawTagAssignedSet.getOrPut(it) { HashSet() }.add(direct) }
-            }
-        }
-
-        var fallbackIdx = keyToSpeaker.values.count { it.startsWith("other_") }
-        val shortFallback = HashMap<String, String>()
-
-        for (i in 0 until nSegs) {
-            val o = segArr.getJSONObject(i)
-            if (o.optString("text").isBlank()) continue
-            var finalSpk = segAssigned[i]
-            if (finalSpk == null && hasDiarizedLabels) {
-                val rawTag = rawLabels[i]
-                val candidatesForTag = rawTag?.let { rawTagAssignedSet[it] }
-                if (candidatesForTag != null && candidatesForTag.size == 1) {
-                    val candSpk = candidatesForTag.first()
-                    val refDbs = speakerDbAcc[candSpk]
-                    val curDb = segDbs[i]
-                    val dbConsistent = refDbs.isNullOrEmpty() || curDb == null ||
-                        abs(curDb - refDbs.average().toFloat()) <= SHORT_INHERIT_MAX_DB_DIFF
-                    if (dbConsistent) {
-                        finalSpk = candSpk
-                    }
-                }
-                if (finalSpk == null && rawTag != null) {
-                    finalSpk = shortFallback.getOrPut(rawTag) {
-                        fallbackIdx++
-                        "other_$fallbackIdx"
-                    }
-                }
-            }
-            if (finalSpk != null) {
-                o.put("speaker", finalSpk)
-                // 若声纹命中了用户改名保护的核心人物，绝不误标为电子外放
-                if (segProximities[i] == Proximity.MEDIA && Proximity.isProtectedSpeakerId(finalSpk, roster)) {
-                    segProximities[i] = Proximity.NEAR
-                    o.put("proximity", Proximity.NEAR)
-                }
-            } else if (isPhoneDirect) {
-                o.remove("speaker")
-            }
-        }
-
-        finishEnrich(root)
-        Log.i(
-            TAG,
-            "${opusFile.name}: v$SCHEMA_VERSION 声纹+分贝完成（${clusters.size} 簇 -> ${keyToSpeaker.values.distinct()}），总耗时 ${System.currentTimeMillis() - t0}ms",
-        )
-        return root
-    }
-
-    private data class Prototype(
-        val id: String,
-        val centroid: FloatArray,
-        val weight: Double,
-        val model: String,
-    )
-
-    private fun loadPrototypes(ctx: Context): Map<String, Prototype> = synchronized(Speakers) {
-        val f = localFile(ctx)
-        if (!f.exists()) return emptyMap()
-        val root = runCatching { JSONObject(f.readText()) }.getOrNull() ?: return emptyMap()
-        if (root.optInt("version", 1) < SCHEMA_VERSION) return emptyMap()
-        val items = root.optJSONObject("items") ?: return emptyMap()
-        val out = LinkedHashMap<String, Prototype>()
-        for (id in items.keys()) {
-            val obj = items.optJSONObject(id) ?: continue
-            val arr = obj.optJSONArray("centroid") ?: continue
-            if (arr.length() != EMBED_DIM) continue
-            val vec = FloatArray(EMBED_DIM) { i -> arr.optDouble(i, 0.0).toFloat() }
-            out[id] = Prototype(
-                id = id,
-                centroid = l2Normalize(vec),
-                weight = obj.optDouble("weight", 1.0),
-                model = obj.optString("model", MODEL_ID),
-            )
-        }
-        out
-    }
-
-    private fun readNextSeqLocked(ctx: Context, knownIds: Set<String>): Int {
-        val f = localFile(ctx)
-        var seq = if (f.exists()) {
-            runCatching { JSONObject(f.readText()).optInt("next_seq", 1) }.getOrDefault(1)
-        } else 1
-        for (id in knownIds) {
-            if (id.startsWith("pspk_")) {
-                val n = id.removePrefix("pspk_").toIntOrNull() ?: 0
-                if (n >= seq) seq = n + 1
-            }
-        }
-        return seq.coerceAtLeast(1)
-    }
-
-    internal fun savePrototype(
-        ctx: Context,
-        id: String,
-        centroid: FloatArray,
-        weight: Double,
-        firstSeen: String?,
-        sample: String?,
-        nextSeqOverride: Int? = null,
-    ) = synchronized(Speakers) {
-        val f = localFile(ctx)
-        val root = if (f.exists()) {
-            runCatching { JSONObject(f.readText()) }.getOrDefault(JSONObject())
-                .let { if (it.optInt("version", 1) < SCHEMA_VERSION) JSONObject() else it }
-        } else JSONObject()
-        root.put("version", SCHEMA_VERSION)
-        if (nextSeqOverride != null) {
-            root.put("next_seq", max(root.optInt("next_seq", 1), nextSeqOverride))
-        } else if (id.startsWith("pspk_")) {
-            val num = id.removePrefix("pspk_").toIntOrNull() ?: 0
-            root.put("next_seq", max(root.optInt("next_seq", 1), num + 1))
-        }
-        val items = root.optJSONObject("items") ?: JSONObject().also { root.put("items", it) }
-        val obj = items.optJSONObject(id) ?: JSONObject()
-        val cArr = JSONArray()
-        for (v in centroid) cArr.put(v.toDouble())
-        obj.put("centroid", cArr)
-        obj.put("weight", weight)
-        obj.put("model", MODEL_ID)
-        if (!firstSeen.isNullOrBlank() && obj.optString("first_seen").isBlank()) {
-            obj.put("first_seen", firstSeen)
-        }
-        if (!sample.isNullOrBlank() && obj.optString("sample").isBlank()) {
-            obj.put("sample", sample.take(80))
-        }
-        items.put(id, obj)
-        Sync.writeFile(f, root.toString())
-    }
-
-    /**
-     * 检查一段待筛音频是否匹配本机已受保护的核心人物声纹（如本人 spk_001 或已命名熟人），
-     * 用于整段远近粗筛兜底：当用户把设备放在桌面 1~2 米处说话时绝不误拦。
-     */
-    internal fun matchesProtectedSpeaker(
-        ctx: Context,
-        pcm16k: FloatArray,
-        spans: List<Span>,
-        minSim: Float = 0.58f,
-    ): Boolean {
-        migrateSchemaFast(ctx)
-        val protos = loadPrototypes(ctx)
-        if (protos.isEmpty()) return false
+    /** 录音粗筛仍可用显式注册身份保护佩戴者；绝不从历史 ASR 标签自举。 */
+    internal fun matchesProtectedSpeaker(ctx: Context, pcm16k: FloatArray, spans: List<Span>, minSim: Float = 0.58f): Boolean {
         val roster = Speakers.all(ctx)
-        val protectedProtos = protos.values.filter { p ->
-            p.model == MODEL_ID && p.centroid.size == EMBED_DIM &&
-                (p.id.startsWith("spk_") || Proximity.isProtectedSpeakerId(p.id, roster))
+        val centroids = enrollmentCentroids(ctx).filterKeys { Proximity.isProtectedSpeakerId(it, roster) }
+        if (centroids.isEmpty()) return false
+        return spans.any { span ->
+            val emb = extractEmbedding(ctx, slice(pcm16k, span.startSec, span.endSec))
+            emb != null && centroids.values.any { cosine(emb, it) >= minSim }
         }
-        if (protectedProtos.isEmpty()) return false
-        val (clip, clipSec) = sliceSpeakerAudio(pcm16k, spans)
-        if (clipSec < MIN_SPEECH_S || clip.isEmpty()) return false
-        val emb = extractEmbedding(ctx, clip) ?: return false
-        return protectedProtos.any { p -> cosine(emb, p.centroid) >= minSim }
-    }
-
-    internal fun matchAndPersistClusters(
-        ctx: Context,
-        clusters: List<Pair<List<String>, LocalTurnGroup>>,
-        firstSeen: String?,
-        allowPersistPrototypes: Boolean = true,
-        eligiblePersistKeys: Set<String>? = null,
-    ): Map<String, String> = synchronized(Speakers) {
-        migrateSchemaFast(ctx)
-        val initialPrototypes = loadPrototypes(ctx)
-        val roster = Speakers.all(ctx)
-        fun canonicalOf(id: String): String {
-            var cur = roster[id] ?: return id
-            val seen = HashSet<String>(4)
-            while (cur.mergedInto != null && seen.add(cur.id)) {
-                cur = roster[cur.mergedInto] ?: break
-            }
-            return cur.id
-        }
-        val allKnownIds = (roster.keys + initialPrototypes.keys).toMutableSet()
-        var nextSeq = readNextSeqLocked(ctx, allKnownIds)
-        val claimedCanonicalIds = HashSet<String>()
-        val mapping = HashMap<String, String>()
-        var otherIdx = 0
-
-        fun nextPhoneSpeakerId(): String {
-            while (true) {
-                val cand = "pspk_%03d".format(nextSeq++)
-                if (cand !in allKnownIds) {
-                    allKnownIds.add(cand)
-                    return cand
-                }
-            }
-        }
-
-        val orderedClusters = clusters.sortedByDescending { it.second.speechSec }
-        for ((memberKeys, cluster) in orderedClusters) {
-            var bestSim = -1f
-            var bestId = ""
-            for ((id, proto) in initialPrototypes) {
-                if (canonicalOf(id) in claimedCanonicalIds) continue
-                if (proto.model != MODEL_ID || proto.centroid.size != cluster.embedding.size) continue
-                val sim = cosine(cluster.embedding, proto.centroid)
-                if (sim > bestSim) {
-                    bestSim = sim
-                    bestId = id
-                }
-            }
-
-            val targetId = when {
-                bestSim >= MATCH_THRESHOLD -> {
-                    claimedCanonicalIds.add(canonicalOf(bestId))
-                    Log.d(TAG, "簇 (${"%.1f".format(cluster.speechSec)}s) 命中声纹 $bestId (cos=${"%.3f".format(bestSim)})")
-                    bestId
-                }
-                allowPersistPrototypes &&
-                    cluster.speechSec >= NEW_SPEAKER_MIN_S &&
-                    (eligiblePersistKeys == null || memberKeys.any { it in eligiblePersistKeys }) -> {
-                    val newId = nextPhoneSpeakerId()
-                    savePrototype(ctx, newId, cluster.embedding, cluster.speechSec, firstSeen, cluster.bestSample, nextSeq)
-                    Log.i(TAG, "新建手机声纹人物 $newId (${"%.1f".format(cluster.speechSec)}s, bestOldCos=${"%.3f".format(bestSim)})")
-                    newId
-                }
-                else -> {
-                    otherIdx++
-                    "other_$otherIdx"
-                }
-            }
-
-            for (k in memberKeys) mapping[k] = targetId
-        }
-        return mapping
     }
 }

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -567,6 +568,11 @@ func (e *Engine) pollAndProcessBatch(ctx context.Context, cfg Config, key []byte
 }
 
 func (e *Engine) processOne(ctx context.Context, cfg Config, key []byte, client *http.Client, iid string) error {
+	// 持久跳过坏音频/可能已计费的超时，后续轮询和进程重启都不能重发同一项。
+	skipFile := filepath.Join(filepath.Dir(e.store.dbPath), "asr_no_retry", iid)
+	if _, err := os.Stat(skipFile); err == nil {
+		return nil
+	}
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v2/inbox/"+url.PathEscape(iid), nil)
 	if err != nil {
@@ -604,6 +610,14 @@ func (e *Engine) processOne(ctx context.Context, cfg Config, key []byte, client 
 	latMs := time.Since(t0).Milliseconds()
 	if err != nil {
 		e.store.RecordASRRun(name, false, latMs, asr.OggOpusDuration(opus), cfg.ASR.Provider, cfg.ASR.Model, err.Error())
+		if errors.Is(err, asr.ErrBadAudio) || errors.Is(err, asr.ErrReadTimeout) {
+			if saveErr := os.MkdirAll(filepath.Dir(skipFile), 0o700); saveErr != nil {
+				return saveErr
+			}
+			if saveErr := os.WriteFile(skipFile, nil, 0o600); saveErr != nil {
+				return saveErr
+			}
+		}
 		return err
 	}
 	e.store.RecordASRRun(name, true, latMs, res.DurationS, res.Engine, res.Model, "")

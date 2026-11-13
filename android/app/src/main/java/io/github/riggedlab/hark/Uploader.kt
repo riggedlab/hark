@@ -3,7 +3,6 @@ package io.github.riggedlab.hark
 import android.content.Context
 import android.util.Log
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 处理录好的 .opus 片段：
@@ -16,13 +15,14 @@ class Uploader(private val ctx: Context) {
     private val markDir = File(ctx.filesDir, "uploaded").apply { mkdirs() }
     private val silentDir = File(ctx.filesDir, "novoice").apply { mkdirs() }
     private val farDir = File(ctx.filesDir, "farvoice").apply { mkdirs() }
+    private val asrNoRetryDir = File(ctx.filesDir, "asr_no_retry").apply { mkdirs() }
 
     fun isUploaded(f: File) = File(markDir, f.name).exists()
     /** 这段录音没有人声，不上传也不调云端 ASR（录音本身照常在手机上保留 7 天） */
     fun isSilent(f: File) = File(silentDir, f.name).exists()
     /** 整段录音仅有远场背景杂谈或电子外放且不匹配本机核心声纹，跳过转写/上传（本地照常保留 7 天） */
     fun isFarSkipped(f: File) = File(farDir, f.name).exists()
-    fun isSkippedBadAudio(f: File) = (badFileFailures[f.name] ?: 0) >= MAX_BAD_FILE_ATTEMPTS
+    fun isSkippedBadAudio(f: File) = File(asrNoRetryDir, f.name).takeIf { it.exists() }?.readText() == AsrFailureKind.BAD_AUDIO.name
 
     /** 后台一次性枚举标记集合，避免列表渲染时逐卡片调用 File.exists() */
     data class MarkSnapshot(
@@ -30,6 +30,7 @@ class Uploader(private val ctx: Context) {
         val silent: Set<String>,
         val farSkipped: Set<String>,
         val badAudio: Set<String>,
+        val asrTimedOut: Set<String>,
         val unuploadedCount: Int,
     )
 
@@ -37,11 +38,13 @@ class Uploader(private val ctx: Context) {
         val up = (markDir.list() ?: emptyArray()).toHashSet()
         val sil = (silentDir.list() ?: emptyArray()).toHashSet()
         val far = (farDir.list() ?: emptyArray()).toHashSet()
-        val bad = badFileFailures.filterValues { it >= MAX_BAD_FILE_ATTEMPTS }.keys.toHashSet()
+        val failures = asrNoRetryDir.listFiles().orEmpty().associate { it.name to it.readText() }
+        val bad = failures.filterValues { it == AsrFailureKind.BAD_AUDIO.name }.keys
+        val timedOut = failures.filterValues { it == AsrFailureKind.READ_TIMEOUT.name }.keys
         val unuploaded = (chunkDir.list() ?: emptyArray()).count { name ->
-            name.endsWith(".opus") && name !in up && name !in sil && name !in far
+            name.endsWith(".opus") && name !in up && name !in sil && name !in far && name !in failures
         }
-        return MarkSnapshot(uploaded = up, silent = sil, farSkipped = far, badAudio = bad, unuploadedCount = unuploaded)
+        return MarkSnapshot(uploaded = up, silent = sil, farSkipped = far, badAudio = bad, asrTimedOut = timedOut, unuploadedCount = unuploaded)
     }
 
     /** 按当前工作模式处理待办片段，并异步触发与 ASR 解耦的本地环境音/心情扫描 */
@@ -128,7 +131,6 @@ class Uploader(private val ctx: Context) {
                     SceneAndMood.scheduleBackgroundScan(ctx)
                 }.onSuccess {
                 ok++
-                badFileFailures.remove(f.name)
                 AppState.update {
                     it.copy(
                         localAsrRunning = null,
@@ -139,9 +141,9 @@ class Uploader(private val ctx: Context) {
             }.onFailure { e ->
                 Log.w(TAG, "local asr ${f.name} failed: ${e.message}")
                 val kind = (e as? PhoneAsrException)?.kind ?: AsrFailureKind.TRANSIENT
-                if (kind == AsrFailureKind.BAD_AUDIO) {
-                    // 单文件格式/解码异常：记次后跳过继续转写后续新录音，不阻塞整条队列，同时保留原音频
-                    badFileFailures[f.name] = (badFileFailures[f.name] ?: 0) + 1
+                if (kind == AsrFailureKind.BAD_AUDIO || kind == AsrFailureKind.READ_TIMEOUT) {
+                    // 坏音频无法重试修复；读超时可能已计费。跨批次、重启也跳过，继续处理后续录音。
+                    markAsrNoRetry(f.name, kind)
                 } else {
                     abortBatch = true
                 }
@@ -167,17 +169,17 @@ class Uploader(private val ctx: Context) {
             val base = it.name.removeSuffix(".txt")
             if (!File(chunkDir, base).exists()) it.delete()
         }
-        badFileFailures.keys.removeIf { !File(chunkDir, it).exists() }
+        asrNoRetryDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
     }
 
     private fun pendingCloud() =
         (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
-            .filter { !isUploaded(it) && !isSilent(it) && !isFarSkipped(it) }
+            .filter { !isUploaded(it) && !isSilent(it) && !isFarSkipped(it) && !File(asrNoRetryDir, it.name).exists() }
             .sortedBy { it.name }
 
     private fun pendingLocalAsr() =
         (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
-            .filter { !isSilent(it) && !isFarSkipped(it) && (badFileFailures[it.name] ?: 0) < MAX_BAD_FILE_ATTEMPTS && Transcripts.get(ctx, it.name) == null }
+            .filter { !isSilent(it) && !isFarSkipped(it) && !File(asrNoRetryDir, it.name).exists() && Transcripts.get(ctx, it.name) == null }
             .sortedBy { it.name }
 
     private fun upload(cfg: Config, f: File): Boolean = runCatching {
@@ -198,13 +200,19 @@ class Uploader(private val ctx: Context) {
         } finally { conn.disconnect() }
     }.onFailure { Log.w(TAG, "upload ${f.name} failed: ${it.message}") }.getOrDefault(false)
 
+    internal fun markAsrNoRetry(name: String, kind: AsrFailureKind) {
+        Sync.writeFile(File(asrNoRetryDir, name), kind.name)
+    }
+
     companion object {
         private const val TAG = "Uploader"
-        private const val MAX_BAD_FILE_ATTEMPTS = 2
         // 前台、录音服务和收尾线程共用，避免同时运行 VAD、重复上传或重复调 ASR。
         private val uploadLock = Any()
-        private val badFileFailures = ConcurrentHashMap<String, Int>()
-
-        fun clearLocalAsrFailures() = badFileFailures.clear()
+        fun clearLocalAsrFailures(ctx: Context) {
+            // 修改配置可重新尝试坏音频；已可能计费的超时不能因此被自动重发。
+            File(ctx.filesDir, "asr_no_retry").listFiles()?.forEach {
+                if (it.readText() == AsrFailureKind.BAD_AUDIO.name) it.delete()
+            }
+        }
     }
 }

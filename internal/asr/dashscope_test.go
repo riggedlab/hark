@@ -5,10 +5,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDashScopeConfigAndStaticHealth(t *testing.T) {
@@ -125,7 +130,7 @@ func TestDashScopeFallbackAndTransientRetry(t *testing.T) {
 			w.WriteHeader(429)
 			_, _ = w.Write([]byte(`{"code":"Throttling"}`))
 		default:
-			_, _ = w.Write([]byte(`{"output":{"text":"你好。再见。","sentence":{"text":"再见。","begin_time":1000,"end_time":2000,"speaker_id":null}},"usage":{"duration":3}}`))
+			_, _ = w.Write([]byte(`{"output":{"text":"你好。再见。","sentence":{"text":"再见。","begin_time":1000,"end_time":2000,"speaker_id":null,"words":[{"text":"你好","punctuation":"。","begin_time":100,"end_time":800},{"text":"再见。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}`))
 		}
 	}))
 	defer srv.Close()
@@ -133,7 +138,7 @@ func TestDashScopeFallbackAndTransientRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 4 || !res.SyntheticSegments || len(res.Segments) != 1 || res.Segments[0].Text != "你好。再见。" || res.Segments[0].End != 3 || res.Segments[0].Speaker != "" {
+	if calls != 4 || res.SyntheticSegments || len(res.Segments) != 2 || res.Segments[0].Text != "你好。" || res.Segments[1].End != 2 || res.Segments[0].Speaker != "" {
 		t.Fatalf("fallback lost full text or retry budget: calls=%d result=%+v", calls, res)
 	}
 }
@@ -144,11 +149,10 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 		status           int
 		synthetic        bool
 	}{
-		{"silent", `{"code":"Audio.AudioSilentError","message":"silent audio"}`, "", 400, false},
 		{"empty", `{"output":{"text":"","sentences":[]},"usage":{"duration":3.4}}`, "", 200, false},
 		{"null", `{"output":{"text":"","sentence":null}}`, "", 200, false},
 		{"text only", `{"output":{"text":"全文"}}`, "全文", 200, true},
-		{"sentence only", `{"output":{"sentence":{"text":"单句","begin_time":100,"end_time":2100,"speaker_id":null}}}`, "单句", 200, false},
+		{"sentence only", `{"output":{"sentence":{"text":"单句","begin_time":100,"end_time":2100,"speaker_id":null}}}`, "单句", 200, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -200,5 +204,108 @@ func TestDashScopeAuthAndParameterFailures(t *testing.T) {
 				t.Fatalf("unexpected error/retries: %v, calls=%d", err, calls)
 			}
 		})
+	}
+}
+
+func TestDashScopeWordsRebuildSentences(t *testing.T) {
+	words := []dashScopeWord{
+		{Text: "你", BeginTime: 100, EndTime: 200},
+		{Text: "好", Punctuation: "。", BeginTime: 250, EndTime: 500},
+		{Text: "Yes!", Punctuation: "!", BeginTime: 700, EndTime: 900},
+		{Text: "先", Punctuation: ",", BeginTime: 1000, EndTime: 1100},
+		{Text: "连", BeginTime: 1900, EndTime: 2100},
+		{Text: "停；", BeginTime: 3001, EndTime: 3300},
+	}
+	for _, array := range []bool{false, true} {
+		var data dashScopeResponse
+		data.Output.Text = "全文不同也保留逐句时间戳"
+		if array {
+			data.Output.Sentences = []dashScopeSentence{{Words: words}}
+		} else {
+			data.Output.Sentence = &dashScopeSentence{Words: words}
+		}
+		res := dashScopeResult(data, "model", 4, !array)
+		expected := []Segment{{Start: 0.1, End: 0.5, Text: "你好。"}, {Start: 0.7, End: 0.9, Text: "Yes!"}, {Start: 1, End: 2.1, Text: "先,连"}, {Start: 3.001, End: 3.3, Text: "停；"}}
+		if res.SyntheticSegments || len(res.Segments) != len(expected) {
+			t.Fatalf("incorrect segmentation: %+v", res)
+		}
+		for i, want := range expected {
+			if got := res.Segments[i]; got.Start != want.Start || got.End != want.End || got.Text != want.Text || got.Speaker != "" {
+				t.Errorf("segment[%d] = %+v, want %+v", i, res.Segments[i], want)
+			}
+		}
+	}
+}
+
+func TestDashScopeBadAudioNeverRetries(t *testing.T) {
+	for _, code := range []string{"InvalidFile.AudioLengthError", "InvalidFile.FormatError", "Audio.DecoderError", "Audio.AudioSilentError"} {
+		calls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(500) // 明确的坏音频类别优先于 HTTP 的临时错误类别。
+			_ = json.NewEncoder(w).Encode(map[string]string{"code": code})
+		}))
+		_, err := Transcribe(context.Background(), Config{Provider: ProviderDashScope, BaseURL: srv.URL, APIKey: "k"}, probeAudio, "test.opus")
+		srv.Close()
+		if !errors.Is(err, ErrBadAudio) || calls != 1 {
+			t.Fatalf("%s: calls=%d err=%v", code, calls, err)
+		}
+	}
+}
+
+type dashScopeTransport func(*http.Request) (*http.Response, error)
+
+func (f dashScopeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type timeoutBody struct{}
+
+func (timeoutBody) Read([]byte) (int, error) { return 0, os.ErrDeadlineExceeded }
+func (timeoutBody) Close() error             { return nil }
+
+func TestDashScopeReadTimeoutNeverRetries(t *testing.T) {
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	for _, bodyTimeout := range []bool{false, true} {
+		calls := 0
+		http.DefaultTransport = dashScopeTransport(func(*http.Request) (*http.Response, error) {
+			calls++
+			if bodyTimeout {
+				return &http.Response{StatusCode: 200, Body: timeoutBody{}, Header: make(http.Header)}, nil
+			}
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+		})
+		_, err := Transcribe(context.Background(), Config{Provider: ProviderDashScope, BaseURL: "http://test", APIKey: "k"}, probeAudio, "test.opus")
+		if err == nil || calls != 1 {
+			t.Fatalf("bodyTimeout=%v calls=%d err=%v", bodyTimeout, calls, err)
+		}
+	}
+}
+
+func TestDashScopeConnectFailureStillRetries(t *testing.T) {
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	calls := 0
+	http.DefaultTransport = dashScopeTransport(func(*http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"output":{"text":""}}`)), Header: make(http.Header)}, nil
+	})
+	_, err := Transcribe(context.Background(), Config{Provider: ProviderDashScope, BaseURL: "http://test", APIKey: "k"}, probeAudio, "test.opus")
+	if err != nil || calls != 2 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+}
+
+func TestDashScopeContextDeadlineDoesNotRetry(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; time.Sleep(100 * time.Millisecond) }))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := Transcribe(ctx, Config{Provider: ProviderDashScope, BaseURL: srv.URL, APIKey: "k"}, probeAudio, "test.opus")
+	if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Fatalf("calls=%d err=%v", calls, err)
 	}
 }

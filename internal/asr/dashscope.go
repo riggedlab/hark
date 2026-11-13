@@ -5,14 +5,20 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
+
+// ErrBadAudio marks an unusable recording; retrying the same audio cannot fix it.
+var ErrBadAudio = errors.New("坏音频，跳过不重试")
+var ErrReadTimeout = errors.New("百炼读取超时，停止自动重试以避免重复计费")
 
 const (
 	dashScopePath         = "/api/v1/services/aigc/multimodal-generation/generation"
@@ -41,10 +47,18 @@ func validateDashScopeURL(endpoint string) error {
 }
 
 type dashScopeSentence struct {
-	Text      string      `json:"text"`
-	BeginTime float64     `json:"begin_time"`
-	EndTime   float64     `json:"end_time"`
-	SpeakerID FlexSpeaker `json:"speaker_id"`
+	Text      string          `json:"text"`
+	BeginTime float64         `json:"begin_time"`
+	EndTime   float64         `json:"end_time"`
+	SpeakerID FlexSpeaker     `json:"speaker_id"`
+	Words     []dashScopeWord `json:"words"`
+}
+
+type dashScopeWord struct {
+	Text        string  `json:"text"`
+	Punctuation string  `json:"punctuation"`
+	BeginTime   float64 `json:"begin_time"`
+	EndTime     float64 `json:"end_time"`
 }
 
 type dashScopeResponse struct {
@@ -108,8 +122,8 @@ func transcribeDashScope(ctx context.Context, cfg Config, opus []byte) (Result, 
 				strings.HasPrefix(data.Code, "AccessDenied") || strings.HasSuffix(data.Code, ".AccessDenied") {
 				return Result{}, fmt.Errorf("百炼鉴权失败 (HTTP %d %s)：请检查百炼 API Key、所属地域与接口地址是否匹配，并确认已开通模型 %s", httpCode, data.Code, cfg.Model)
 			}
-			if data.Code == "Audio.AudioSilentError" {
-				return Result{DurationS: math.Round(OggOpusDuration(opus)*100) / 100, Engine: ProviderDashScope, Model: cfg.Model, Segments: []Segment{}}, nil
+			if strings.HasPrefix(data.Code, "InvalidFile.") || strings.HasPrefix(data.Code, "Audio.") || httpCode == 413 || httpCode == 415 {
+				return Result{}, fmt.Errorf("%w: %s %s", ErrBadAudio, data.Code, data.Message)
 			}
 			parameterError := httpCode == 400 || httpCode == 422 || strings.HasPrefix(data.Code, "InvalidParameter") || data.Code == "UnsupportedParameter"
 			if enableSpeaker && parameterError && strings.Contains(strings.ToLower(data.Message), "diarization") {
@@ -124,10 +138,15 @@ func transcribeDashScope(ctx context.Context, cfg Config, opus []byte) (Result, 
 				if parseErr != nil {
 					return Result{}, fmt.Errorf("解析百炼响应失败: %w", parseErr)
 				}
-				return dashScopeResult(data, cfg.Model, OggOpusDuration(opus)), nil
+				return dashScopeResult(data, cfg.Model, OggOpusDuration(opus), enableSpeaker), nil
 			}
-		} else if ctx.Err() != nil || retries >= len(backoffs) {
-			return Result{}, err
+		} else {
+			if dashScopeReadTimeout(err) {
+				return Result{}, fmt.Errorf("%w: %w", ErrReadTimeout, err)
+			}
+			if ctx.Err() != nil || retries >= len(backoffs) {
+				return Result{}, err
+			}
 		}
 		timer := time.NewTimer(backoffs[retries])
 		select {
@@ -140,7 +159,20 @@ func transcribeDashScope(ctx context.Context, cfg Config, opus []byte) (Result, 
 	}
 }
 
-func dashScopeResult(data dashScopeResponse, model string, localDur float64) Result {
+func dashScopeReadTimeout(err error) bool {
+	// Dial failures are safe to retry. A timeout after connecting may already have been billed.
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout net.Error
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+func dashScopeResult(data dashScopeResponse, model string, localDur float64, enableSpeaker bool) Result {
 	dur := data.Usage.Duration
 	if dur <= 0 {
 		dur = localDur
@@ -150,26 +182,40 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64) Res
 	if len(sentences) == 0 && data.Output.Sentence != nil {
 		sentences = []dashScopeSentence{*data.Output.Sentence}
 	}
+	if !enableSpeaker || len(data.Output.Sentences) == 0 {
+		var words []dashScopeWord
+		for _, sentence := range sentences {
+			words = append(words, sentence.Words...)
+		}
+		if len(words) == 0 && data.Output.Sentence != nil {
+			words = data.Output.Sentence.Words
+		}
+		segs = dashScopeWordSegments(words)
+	} else {
+		for _, sentence := range sentences {
+			txt := strings.TrimSpace(sentence.Text)
+			if txt == "" {
+				continue
+			}
+			start := sentence.BeginTime / 1000
+			end := max(start, sentence.EndTime/1000)
+			segs = append(segs, Segment{Start: start, End: end, Text: txt, Speaker: sentence.SpeakerID})
+		}
+	}
 	var speechS float64
 	var textParts []string
-	for _, sentence := range sentences {
-		txt := strings.TrimSpace(sentence.Text)
-		if txt == "" {
-			continue
-		}
-		start := sentence.BeginTime / 1000
-		end := max(start, sentence.EndTime/1000)
-		segs = append(segs, Segment{Start: start, End: end, Text: txt, Speaker: sentence.SpeakerID})
-		speechS += end - start
-		textParts = append(textParts, txt)
+	for _, s := range segs {
+		speechS += s.End - s.Start
+		textParts = append(textParts, s.Text)
 	}
 	fullText := strings.TrimSpace(data.Output.Text)
 	if fullText == "" {
 		fullText = strings.Join(textParts, "")
 	}
-	// Without diarization, output.sentence describes only the current (last) sentence.
-	// Preserve output.text rather than dropping earlier sentences from the transcript.
-	synthetic := fullText != "" && (len(segs) == 0 || (len(data.Output.Sentences) == 0 && strings.Join(textParts, "") != fullText))
+	if fullText == "" && data.Output.Sentence != nil {
+		fullText = strings.TrimSpace(data.Output.Sentence.Text)
+	}
+	synthetic := fullText != "" && len(segs) == 0
 	if synthetic {
 		segs = []Segment{{Start: 0, End: math.Round(dur*100) / 100, Text: fullText}}
 		speechS = dur
@@ -178,4 +224,37 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64) Res
 		Text: fullText, DurationS: math.Round(dur*100) / 100, SpeechS: math.Round(speechS*100) / 100,
 		Engine: ProviderDashScope, Model: model, Segments: segs, SyntheticSegments: synthetic,
 	}
+}
+
+func dashScopeWordSegments(words []dashScopeWord) []Segment {
+	segs := []Segment{}
+	var text strings.Builder
+	var startMs, endMs float64
+	flush := func() {
+		if txt := strings.TrimSpace(text.String()); txt != "" {
+			segs = append(segs, Segment{Start: startMs / 1000, End: endMs / 1000, Text: txt})
+		}
+		text.Reset()
+	}
+	for _, w := range words {
+		if strings.TrimSpace(w.Text+w.Punctuation) == "" {
+			continue
+		}
+		if text.Len() > 0 && w.BeginTime-endMs > 800 {
+			flush()
+		}
+		if text.Len() == 0 {
+			startMs = w.BeginTime
+		}
+		endMs = w.EndTime
+		text.WriteString(w.Text)
+		if w.Punctuation != "" && !strings.HasSuffix(w.Text, w.Punctuation) {
+			text.WriteString(w.Punctuation)
+		}
+		if strings.ContainsAny(w.Text+w.Punctuation, "。！？!?；") {
+			flush()
+		}
+	}
+	flush()
+	return segs
 }

@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import java.io.File
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -131,26 +133,18 @@ class ProximityTest {
     }
 
     @Test
-    fun farAndMediaClustersDoNotCreateGlobalPspkWhileMatchingExistingSpeaker() {
+    fun registeredSpeakersMatchAndStrangersRemainLocal() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
-        val knownVec = Voiceprint.l2Normalize(FloatArray(192) { if (it == 0) 1f else 0.01f })
-        val farStrangerVec = Voiceprint.l2Normalize(FloatArray(192) { if (it == 5) 1f else -0.01f })
-        Voiceprint.savePrototype(ctx, "spk_001", knownVec, 30.0, "2026-11-12 09:00", "我是佩戴者本人")
-
-        val clusters = listOf(
-            listOf("u_0") to Voiceprint.LocalTurnGroup("u_0", 15.0, knownVec, "桌面上本人说话"),
-            listOf("u_1") to Voiceprint.LocalTurnGroup("u_1", 18.0, farStrangerVec, "隔壁工位聊了十八秒八卦"),
+        val known = Voiceprint.l2Normalize(FloatArray(192) { if (it == 0) 1f else 0.01f })
+        val stranger = Voiceprint.l2Normalize(FloatArray(192) { if (it == 5) 1f else -0.01f })
+        Voiceprint.addEnrollment(ctx, "spk_001", "20261113-140000.opus", 0.0, 2.0, known, "user")
+        val assigned = Voiceprint.assignSpeakers(
+            listOf(Voiceprint.Utterance(0, 15.0, known), Voiceprint.Utterance(1, 18.0, stranger)),
+            Voiceprint.enrollmentCentroids(ctx),
         )
-        // 即使两簇都被标为非近场（eligiblePersistKeys 为空），已知 spk_001 仍正常命中，而远场陌生人绝不新建 pspk_
-        val mapping = Voiceprint.matchAndPersistClusters(
-            ctx = ctx,
-            clusters = clusters,
-            firstSeen = "2026-11-13 14:00",
-            allowPersistPrototypes = true,
-            eligiblePersistKeys = emptySet(),
-        )
-        assertEquals("spk_001", mapping["u_0"])
-        assertEquals("other_1", mapping["u_1"])
+        assertEquals("spk_001", assigned[0])
+        assertEquals("other_1", assigned[1])
+        assertFalse(File(ctx.filesDir, "speakers_local.json").exists())
     }
 
     @Test
