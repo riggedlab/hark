@@ -58,6 +58,9 @@ type queryFlags struct {
 	asJSON  bool
 }
 
+// version 由发布构建通过 -ldflags "-X main.version=x.y.z" 注入。
+var version = "dev"
+
 var legacyLongFlags = map[string]bool{
 	"data-dir": true,
 	"config":   true,
@@ -142,6 +145,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	root := &cobra.Command{
 		Use:           "hark",
+		Version:       version,
 		Short:         "Hark 本地语音存档查询与后台同步工具",
 		Long:          "Hark 本地语音存档 CLI：查询子命令（status / timeline / search / get / speakers）均以纯只读方式打开本地 SQLite，不联网、不访问钥匙串。",
 		SilenceErrors: true,

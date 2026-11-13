@@ -1,0 +1,46 @@
+name: 问题反馈
+description: 软件出错、崩溃、转写异常、连不上设备等
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！**请不要贴录音、转写原文、密钥、Token 或 `.env` 内容。** 日志里有这些信息的，请先打码。
+  - type: dropdown
+    id: component
+    attributes:
+      label: 哪个部分
+      options:
+        - Android App · 手机直连转写
+        - Android App · 云端信箱同步
+        - DT-1 固件 / 蓝牙
+        - 盲信箱（server）
+        - 桌面端 / hark-worker
+        - hark 命令行 / Agent 技能
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: App「设备状态」里的版本号、`hark --version`，或者 Release 标签
+      placeholder: v0.1.2
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: 环境
+      description: 手机型号和 Android 版本、电脑系统、用的 ASR 服务商
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么，怎么复现
+      description: 你做了什么、期望看到什么、实际看到什么
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或截图（打码后）

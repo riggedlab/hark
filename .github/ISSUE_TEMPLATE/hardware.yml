@@ -1,0 +1,27 @@
+name: 硬件 / 外壳反馈
+description: 打印、装配、松紧、续航、重量等实物反馈
+labels: [hardware]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        实物反馈对我们很有用。⚠️ 如果遇到电池**鼓包、发烫、冒烟或有异味**，请先断开电池，放到安全的地方，再来反馈。
+  - type: dropdown
+    id: enclosure
+    attributes:
+      label: 外壳款式
+      options: [简易款 dt1-plain, 谛听款 dt1-carved, 没用外壳 / 其他]
+    validations:
+      required: true
+  - type: input
+    id: printer
+    attributes:
+      label: 打印机、喷嘴和耗材
+      placeholder: Creality K3 / 0.4mm / 黑色 PLA
+  - type: textarea
+    id: result
+    attributes:
+      label: 结果
+      description: 松紧怎么样（偏松或偏紧大概多少）、怎么处理的、续航和重量实测，附照片更好
+    validations:
+      required: true

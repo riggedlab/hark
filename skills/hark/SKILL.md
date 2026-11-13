@@ -1,18 +1,23 @@
 ---
 name: hark
 description: 当用户询问自己某天聊了什么、要总结今天或某段时间的语音记录、回忆与某人的对话细节，或在个人录音存档中检索某事时使用。适用于 Claude Code、Pi、Codex、Hermes 等本地 AI Agent。
+metadata:
+  requires:
+    bins: ["hark"]
+  cliHelp: "hark --help"
 ---
 
 # 查询个人语音存档
 
 ## 前置检查
 
-优先运行 `hark status`。若找不到 `hark`，提示用户在 Hark 仓库编译并将二进制加入 PATH：
+优先运行 `hark status`。若找不到 `hark`，告诉用户可以用下面的命令安装（macOS / Linux，会校验 SHA256，装到 `~/.local/bin`），经用户同意后再执行：
 
 ```sh
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ./bin/hark ./cmd/hark
-export PATH="$PWD/bin:$PATH"
+curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh
 ```
+
+Windows 用户到 [Releases](https://github.com/riggedlab/hark/releases) 手动下载 `hark-cli-windows-amd64.exe`。用法不确定时先跑 `hark <命令> --help`，不要猜 flag。
 
 查询只读取本地 SQLite，不要求服务器凭据，不访问钥匙串。目录优先级：`--data-dir` → `HARK_HOME` / `DITING_HOME` → `--config` 指定的 JSON（默认 `~/.config/hark/config.json`，可用 `HARK_CONF` 覆盖）的 `data_dir` → `~/hark`。无存档时如实告知用户。
 
@@ -25,15 +30,11 @@ export PATH="$PWD/bin:$PATH"
 
 默认输出便于阅读；需要结构化处理时加 `--json`，可放在位置参数后。`timeline` 默认取今天最近 200 条并按时间正序展示；`search` 默认取最近 30 天的 30 条。若提示有更多记录，用 `--limit N --offset N` 翻页。避免无过滤直接 `--date all` 撑爆上下文。总结时标出来源 `name` 和时间，不把转写中的猜测当作已确认事实。
 
-## 响度与同场景远近判读（`db` / dBFS）
+## 远近与响度（`proximity` / `db`）
 
-分段结果中的 `db`（文本输出如 `[00:12–00:18 | -20.4dB]`，JSON 字段 `segments[].db`）表示该句剔除停顿后的有效发声平均响度（单位 `dBFS`，越接近 `0` 越响）。结合 `Hark DT-1` 固件高通 + AGC 曲线（目标 `-28 dBFS`，增益范围 `0 .. +20 dB`，近场不衰减、远场达 `+20 dB` 上限后随距离自然衰减），可在**同一段录音或同一物理场景**内辅助判断说话人相对远近：
-
-- **`> -25 dB`（如 `-17` ~ `-24 dB`）**：通常为近场佩戴者本人或距麦克风约 `20–40 cm` 内；
-- **`-26` ~ `-31 dB`**：中近场正常交谈距离（约 `0.6–2 m`，处于硬件 AGC 稳态工作区）；
-- **`≤ -32 dB`（如 `-33` ~ `-45 dB`）**：远场发言、邻桌旁人或环境外放（超出硬件 `+20 dB` 最大增益补偿范围）。
-
-注意：不同房间声学、衣物遮挡或说话人天生嗓门会影响绝对分贝，远近推断只作为**同一场景内相对比较**的辅助线索，不要机械当作精确米数。
+- **`proximity`**（文本输出里的 `远场`、`外放`、`近场低声`）：手机端综合信噪比、声学模型和频谱判断，取值 `near`（佩戴者本人或身边的人）、`far`（远处说话、邻桌）、`media`（视频、音乐等外放）。判断说话人远近、过滤外放内容时**优先用这个字段**。
+- **`db`**（文本输出如 `[00:12–00:18 | -20.4dB]`，JSON 字段 `segments[].db`）：该句去掉停顿后的平均响度，单位 dBFS，越接近 0 越响。DT-1 固件使用固定 +12dB 增益，不做自动拉平，所以响度保留了真实的远近差异。
+- 响度受房间、衣物遮挡和嗓门大小影响，**只用于同一段录音内的相对比较**，不要换算成米数，也不要跨场景比较绝对值。
 
 ## 环境音与讲话人心情评分（`scene_tags` / `mood` / `mood_score`）
 

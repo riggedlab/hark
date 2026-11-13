@@ -1,33 +1,70 @@
-# `hark` 命令行
+# `hark` 命令行与 AI Agent 技能
 
-`hark` 是给本地 AI Agent（Claude Code、Pi、Codex、Hermes 等）用的只读查询工具，读的是电脑端的本地语音存档。它不需要服务器凭据，也不访问钥匙串。
+让 Claude Code、Codex、Pi、Hermes 这类本地 AI Agent 能回答「我今天聊了什么」「上周和老王说的那件事」。
 
-## 安装
+分两部分：
+- **`hark` 命令行**：只读查询电脑端的本地语音存档（`~/hark/hark.db`）。它不联网，不需要服务器凭据，也不访问钥匙串。
+- **`hark` 技能**（[`skills/hark/SKILL.md`](../skills/hark/SKILL.md)）：告诉 Agent 什么时候、怎么用这个命令行。
 
-在仓库根目录构建，然后把二进制目录加到 PATH：
+前提：电脑端（桌面端或 `hark-worker`）已经在运行，本机已经有转写存档。
 
-```sh
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o ./bin/hark ./cmd/hark
-export PATH="$PWD/bin:$PATH"
-```
-
-也可以直接从 [Releases](https://github.com/riggedlab/hark/releases) 下载 `hark-*` 单二进制。
-
-## 常用命令
+## 快速开始（自己动手）
 
 ```sh
-hark status                                   # 存档概况
-hark speakers                                 # 人物 ID 与显示名称
-hark timeline --date today                    # 今天的完整对话，按时间正序
-hark search "接口" --date 30d --speaker "老王"  # 跨天检索，返回命中片段
-hark get 20261112-143000 --json               # 某段录音的完整上下文
+# 1. 安装命令行（macOS / Linux；会校验 SHA256，装到 ~/.local/bin）
+curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh
+
+# 2. 把技能装给你电脑上的所有 Agent（Claude Code、Codex 等）
+npx skills add riggedlab/hark -g -y
+
+# 3. 确认能读到存档
+hark status
 ```
 
-- `timeline` 默认取今天最近 200 条；`search` 默认取最近 30 天的 30 条。
-- 两者都支持 `--date today|yesterday|7d|30d|all|YYYY-MM-DD`、`--speaker`（ID 或名称）、`--limit`、`--offset`。
-- `get <name...>` 可一次给多个文件名，`.opus` 后缀可省略。
-- 所有查询都支持 `--json`。flags 放在位置参数前后都可以。
-- 还没有数据库时会提示「本地暂无录音存档」，不会创建空库。
+然后直接问 Agent：「我今天都聊了什么？」
+
+## 快速开始（让 Agent 帮你装）
+
+把下面这段话发给你的 Agent：
+
+> 帮我安装 Hark 的命令行和技能：先运行 `curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh`，再运行 `npx skills add riggedlab/hark -g -y`，最后运行 `hark status`，把结果告诉我。
+
+## 其他安装方式
+
+- **Windows**：到 [Releases](https://github.com/riggedlab/hark/releases) 下载 `hark-cli-windows-amd64.exe`，改名为 `hark.exe`，放进 PATH 里的某个目录。
+- **用 Go 安装**：`go install github.com/riggedlab/hark/cmd/hark@latest`。
+- **从源码构建**：`CGO_ENABLED=0 go build -trimpath -o ./bin/hark ./cmd/hark`。
+- **指定版本或目录**：安装脚本支持环境变量 `HARK_VERSION=0.1.2`、`HARK_INSTALL_DIR=/some/bin`。
+- **只给某一个 Agent 装技能**：`npx skills add riggedlab/hark -g -a claude-code`。不想用 npx，也可以手动把仓库里的 `skills/hark` 目录软链到 Agent 的技能目录，例如 `~/.claude/skills/hark`。
+
+## 更新
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh   # 命令行
+npx skills update hark -g                                                                     # 技能
+```
+
+查看当前版本：`hark --version`。
+
+## 命令
+
+| 命令 | 作用 |
+|---|---|
+| `hark status` | 存档概况：时间范围、条数 |
+| `hark speakers` | 已建档的人物 ID 和显示名称 |
+| `hark timeline --date today` | 按时间正序看完整对话，默认取今天最近 200 条 |
+| `hark search "接口" --date 30d` | 跨天检索，返回命中片段，默认取最近 30 天的 30 条 |
+| `hark get 20261112-143000` | 一段或多段录音的完整上下文，`.opus` 后缀可省略 |
+
+通用参数：
+- `--date today|yesterday|7d|30d|all|YYYY-MM-DD`
+- `--speaker`：人物 ID 或名称
+- `--limit`、`--offset`：翻页
+- `--json`：结构化输出，适合 Agent 处理
+
+每个命令的完整参数用 `hark <命令> --help` 查看。
+
+还没有存档时，命令会提示「本地暂无录音存档」，不会创建空库。
 
 ## 数据目录
 
@@ -40,22 +77,7 @@ hark get 20261112-143000 --json               # 某段录音的完整上下文
 
 旧版的 `diting.db` 也能直接读。
 
-## 维护命令（会写数据，不属于只读查询）
+## 维护命令（会写数据，Agent 技能不会调用）
 
 - `hark worker [flags]`：和 `hark-worker` 是同一个引擎，flags 也一样。
 - `hark gen-key`：生成手机与电脑共用的密钥。
-
-## 接入 Agent 技能
-
-把仓库里的 `skills/hark` 软链到你所用 Agent 的技能目录。如果已经有同名技能，先核对一下，不要覆盖：
-
-```sh
-# Claude Code
-mkdir -p ~/.claude/skills && ln -s "$PWD/skills/hark" ~/.claude/skills/hark
-# Pi
-mkdir -p ~/.pi/agent/skills && ln -s "$PWD/skills/hark" ~/.pi/agent/skills/hark
-# Codex（以及其他读取 ~/.agents/skills 的 Agent）
-mkdir -p ~/.agents/skills && ln -s "$PWD/skills/hark" ~/.agents/skills/hark
-```
-
-Hermes 等支持 `SKILL.md` 的 Agent，把同一个目录链接到各自的技能目录即可。

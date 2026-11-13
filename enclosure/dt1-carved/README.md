@@ -10,7 +10,7 @@
 | `parts/case-back.stl` | 底盒（结构和简易款相同） |
 | `previews/` | 渲染图 |
 
-切片参数和[简易款](../dt1-plain/)相同。用木粉 PLA 时，喷嘴温度调到 205°C 左右，速度放慢。
+参考切片参数和[简易款](../dt1-plain/)相同，也需要按你的打印机和耗材调整。松紧处理见 [docs/hardware.md 的「尺寸与松紧」](../../docs/hardware.md#尺寸与松紧)。用木粉 PLA 时，喷嘴温度调到 205°C 左右，速度放慢。
 
 接线、装配和注意事项见 [docs/hardware.md](../../docs/hardware.md)。
 

@@ -8,6 +8,10 @@ Hark 是一个开源的随身语音采集器，硬件代号 **DT-1**，可以全
 
 目前处于公开 alpha 阶段，手机端只支持 Android。
 
+> **当前重心是手机端。** 我们在家里的 Mac 上跑本地 ASR，效果不理想，所以优先把「手机直连转写」做扎实。电脑端（桌面端、`hark-worker`）和盲信箱能用，但**还没经过高频使用**，可能有不少粗糙的地方。
+>
+> 遇到问题、有想法，欢迎[提 issue](https://github.com/riggedlab/hark/issues/new/choose)。
+
 ## 它怎么工作
 
 ```text
@@ -18,7 +22,7 @@ DT-1 ──蓝牙加密──▶ 手机 App ──端到端加密──▶ 盲�
 ```
 
 - **DT-1**：一块带麦克风的开发板，录音压缩成 Opus 后通过蓝牙加密发给手机。
-- **手机 App**：负责接收、切段，然后加密上传。也可以不上传，直接在手机上转文字（见下文）。
+- **手机 App**：负责接收、切段。可以直接在手机上转文字（推荐），也可以加密上传给电脑端处理。
 - **盲信箱**（`server/`）：一个只转存密文的中转服务器。它没有密钥，自己解不开任何内容。
 - **电脑端**：从信箱取回录音，在内存里解密，然后调用你配置的 ASR 服务转成文字，存进本机 SQLite。ASR 指语音转文字服务。
 - **AI Agent**：通过 `hark` 命令行只读查询本地存档。
@@ -51,7 +55,11 @@ DT-1 ──蓝牙加密──▶ 手机 App ──端到端加密──▶ 盲�
 - 购物清单：[docs/shopping-list.md](docs/shopping-list.md)
 - 外壳：[enclosure/](enclosure/)
 
-> ⚠️ **动手前先读[安全须知](docs/hardware.md#安全须知)。** 自己焊锂电池有起火风险。
+> [!WARNING]
+> **安全第一。动手前请完整读一遍[安全须知](docs/hardware.md#安全须知)。**
+> - 这是需要自己焊锂电池的 DIY 设备，不是认证过的成品。锂电池短路、受压、过热都可能起火。
+> - 前几次充电要有人在场，放在不可燃的台面上。不要边充电边戴着睡觉，不要给儿童佩戴。
+> - 外壳装不进去时**不要硬按**。打印参数只是参考，请按你的打印机调整；打出来偏松或偏紧怎么办，见[尺寸与松紧](docs/hardware.md#尺寸与松紧)。
 
 烧录固件前，需要先安装 nRF Connect SDK v3.4.2，详见 [firmware/README.md](firmware/README.md)：
 
@@ -59,23 +67,19 @@ DT-1 ──蓝牙加密──▶ 手机 App ──端到端加密──▶ 盲�
 ./firmware/flash.sh recorder
 ```
 
-### 2. 安装软件
+### 2. 安装手机 App，用「手机直连转写」（推荐）
 
-[Releases](https://github.com/riggedlab/hark/releases) 页面提供以下构建产物：
+从 [Releases](https://github.com/riggedlab/hark/releases) 下载 `hark-*-android-arm64.apk` 安装，之后可以在 App 里检查更新、覆盖升级。
 
-| 组件 | 文件 |
-|---|---|
-| 桌面端 macOS（Apple Silicon / Intel），自动更新 | `hark-*.dmg` |
-| 桌面端 Windows，自动更新 | `hark-setup-*-amd64.exe` |
-| 桌面端 Linux，自动更新 | `hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz` |
-| Android，可覆盖升级 | `hark-*-android-arm64.apk` |
-| 盲信箱 | 镜像 `ghcr.io/riggedlab/hark-mailbox:latest` 或单文件 `hark-mailbox-linux-*` |
-| 无界面 Worker（NAS / 服务器用） | `hark-worker-*` |
-| AI Agent 查询命令行 | `hark-*` |
+在 App 的「设备状态 → 转写与同步设置」里选择 **手机直连转写**，填上 ASR 服务即可，支持火山引擎豆包、OpenAI 兼容接口或自建 HTTP 服务。这样不需要信箱，也不需要电脑，手机直接出字，转写结果留在手机上。注意：录音会发给你配置的 ASR 服务商处理，想完全不出本机，只能用你自建的 HTTP 服务。
 
-### 3. 部署盲信箱
+### 3. （可选）电脑端存档：盲信箱 + 电脑端
 
-用 Docker 部署，或者直接运行单文件。更多部署方式见 [server/README.md](server/README.md)。
+> 这条链路还没经过高频使用。
+
+如果想把录音集中存到电脑上，或者让本机的 AI Agent 能查询，就切到 **云端信箱同步** 模式。录音会加密上传到盲信箱，再由电脑端统一转写存档。两种模式可以随时切换，各自的凭据都会保留。7 天内切回云端模式时，还没上传的录音会自动补传。
+
+**① 部署盲信箱**：用 Docker 部署，或者直接下载 `hark-mailbox-linux-*` 单文件运行。详见 [server/README.md](server/README.md)。
 
 ```sh
 cd server
@@ -83,38 +87,32 @@ cp .env.example .env   # 填入两个不同的随机字符串：PHONE_TOKEN、WO
 docker compose up -d --build
 ```
 
-### 4. 配置电脑端
+**② 安装电脑端**：从 [Releases](https://github.com/riggedlab/hark/releases) 下载对应系统的桌面端，都支持自动更新：
 
-打开桌面端，按顺序做三件事：
+| 系统 | 文件 |
+|---|---|
+| macOS（Apple Silicon / Intel） | `hark-*.dmg` |
+| Windows | `hark-setup-*-amd64.exe` |
+| Linux | `hark_*_amd64.deb` / `hark_*_arm64.deb` / `.tar.gz` |
+
+装好后，打开桌面端，按顺序做三件事：
 
 1. 在「信箱与存储」里点「生成新密钥」并保存。
 2. 把密钥填到手机 App 的「服务器设置」。
-3. 在「ASR 接入」里选一个服务商，比如硅基流动、Groq、OpenAI，或者自建的本地声纹服务。然后点「测试连接」，桌面端会发送一段内置的双人测试语音，验证连通性、耗时、时间戳和声纹能力。
+3. 在「ASR 接入」里选一个服务商，然后点「测试连接」，确认能连上。ASR 服务的接入说明见 [docs/asr-guides/](docs/asr-guides/)。
 
-ASR 服务的接入说明，以及在 Mac 上本地跑的方法，见 [docs/asr-guides/](docs/asr-guides/)。
+不想开桌面端，也可以在 NAS 或 Linux 服务器上常驻运行无界面的 `hark-worker-*`：先运行 `-gen-key` 生成密钥，再直接运行，开始常驻拉取。
 
-如果不想开桌面端，也可以用无界面 Worker，适合放在 NAS 或 Linux 服务器上常驻：
+### 4. （可选）接入你的 AI Agent
 
-```sh
-./hark-worker -gen-key   # 生成共享密钥
-./hark-worker            # 常驻拉取；加 -once 则处理完当前队列就退出
-```
-
-### 5. 选择手机工作模式
-
-在 App 的「设备状态 → 转写与同步设置」里可以随时切换两种模式，两套凭据各自保留：
-
-- **云端信箱同步**：录音加密上传到盲信箱，由电脑端统一转写和存档。
-- **手机直连转写**：不需要信箱，也不需要电脑。手机直接调用 ASR 服务出字，支持火山引擎豆包、OpenAI 兼容接口或自建 HTTP 服务。7 天内切回云端模式时，还没上传的录音会自动补传。
-
-### 6. 接入你的 AI Agent
+需要先完成第 3 步：Agent 读的是电脑上的存档。
 
 ```sh
-hark timeline --date today
-hark search "接口" --date 30d --speaker "老王"
+curl -fsSL https://raw.githubusercontent.com/riggedlab/hark/main/tools/install-cli.sh | sh   # 安装 hark 命令行
+npx skills add riggedlab/hark -g -y                                                         # 给 Claude Code、Codex 等装技能
 ```
 
-把 `skills/hark` 软链到 Claude Code、Codex、Pi 等 Agent 的技能目录后，就可以直接问它「我今天聊了什么」。完整用法见 [docs/cli.md](docs/cli.md)。
+然后直接问它「我今天聊了什么」。Windows 安装方式、更新方法和完整命令见 [docs/cli.md](docs/cli.md)。
 
 ## 进度与计划
 
@@ -140,9 +138,11 @@ skills/hark/   本地 AI Agent 查询技能
 docs/          硬件、ASR 接入、命令行、开发文档
 ```
 
-## 参与开发
+## 反馈与参与
 
-从源码构建、运行测试和发布版本的方法，见 [docs/development.md](docs/development.md)。
+- **遇到问题、有建议**：请[提 issue](https://github.com/riggedlab/hark/issues/new/choose)。说明你用的是哪个组件、什么版本，以及怎么复现。**不要上传录音、转写内容、密钥或 `.env` 文件。**
+- **硬件打印、装配的实物反馈**也非常欢迎，比如松紧是否合适、实测续航多久、整机多重。我们自己验证过的组合有限。
+- **想改代码**：从源码构建、运行测试和发布版本的方法，见 [docs/development.md](docs/development.md)。
 
 ## 许可证
 
