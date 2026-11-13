@@ -132,6 +132,13 @@ export interface ResolvedSegment {
   text: string;
   speaker_id?: string;
   speaker_label?: string;
+  db?: number;
+  snr_db?: number;
+  act_s?: number;
+  proximity?: string;
+  mood?: string;
+  mood_score?: number;
+  vocal_tag?: string;
 }
 
 export interface RuntimeStatus {
@@ -150,6 +157,12 @@ export interface RuntimeStatus {
   roster_ver: number;
 }
 
+/** SceneTag 环境音与副语言事件标签（由端侧 CED-Tiny 离线识别）。 */
+export interface SceneTag {
+  label: string;
+  score: number;
+}
+
 export interface SpeakerBadge {
   id: string;
   label: string;
@@ -164,6 +177,7 @@ export interface TranscriptDetail {
   model: string;
   text: string;
   segments: ResolvedSegment[];
+  scene_tags?: SceneTag[];
 }
 
 // ---- Services ----
