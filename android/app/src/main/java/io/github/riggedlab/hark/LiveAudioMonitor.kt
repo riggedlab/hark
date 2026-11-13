@@ -106,7 +106,10 @@ object LiveAudioMonitor {
         }
     }
 
-    fun start(context: Context) {
+    @Volatile private var speechListener: (() -> Unit)? = null
+
+    fun start(context: Context, onSpeechDetected: (() -> Unit)? = null) {
+        if (onSpeechDetected != null) speechListener = onSpeechDetected
         if (active != null) return
         val worker = Worker(context.applicationContext)
         active = worker
@@ -114,6 +117,7 @@ object LiveAudioMonitor {
     }
 
     fun stop() {
+        speechListener = null
         val worker = active
         active = null
         worker?.finish()
@@ -140,8 +144,8 @@ object LiveAudioMonitor {
     private data class Packet(val seq: Int, val opus: ByteArray, val epoch: Int, val at: Long)
 
     private class Worker(private val context: Context) : Thread("hark-live-audio") {
-        // 5 × 20ms = 100ms；这是可丢弃的分析队列，录音写入完全不受容量限制。
-        private val queue = ArrayBlockingQueue<Packet>(5)
+        // 128 × 20ms ≈ 2.56s；非阻塞分析队列，兼顾后台省电调度抖动与录音写入零阻塞。
+        private val queue = ArrayBlockingQueue<Packet>(128)
         private val epoch = AtomicInteger()
         @Volatile private var running = true
         @Volatile private var failed = false
@@ -199,14 +203,21 @@ object LiveAudioMonitor {
                     lastPcmNanos = t
                     pushBarSample(level, t)
                 }
-                if (vad?.accept(value) == true) lastSpeech = System.nanoTime()
+                if (vad?.accept(value) == true) {
+                    lastSpeech = System.nanoTime()
+                    runCatching { speechListener?.invoke() }
+                }
             }
 
             try {
+                var idleTicks = 0
                 while (running) {
-                    val packet = try { queue.poll(50, TimeUnit.MILLISECONDS) }
-                        catch (_: InterruptedException) { null }
+                    val needPeriodicSweep = decoder != null || idleTicks < 80
+                    val packet = try {
+                        if (needPeriodicSweep) queue.poll(100, TimeUnit.MILLISECONDS) else queue.take()
+                    } catch (_: InterruptedException) { null }
                     if (!running) break
+                    if (packet != null) idleTicks = 0 else idleTicks++
                     if (seenEpoch != epoch.get()) {
                         resetAudio()
                         seenEpoch = epoch.get()
@@ -214,7 +225,7 @@ object LiveAudioMonitor {
                     }
                     try {
                         if (!failed && packet != null && packet.epoch == seenEpoch &&
-                            System.nanoTime() - packet.at <= 200_000_000L) {
+                            System.nanoTime() - packet.at <= 1_500_000_000L) {
                             if (packet.opus.isEmpty()) {
                                 resetAudio() // 安静声明不需要解码补静音，清掉 Silero 的上下文即可。
                             } else {

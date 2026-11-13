@@ -38,6 +38,10 @@ class RecorderService : Service() {
         super.onCreate()
         uploader = Uploader(this)
         chunks = ChunkRecorder(chunkDir(this), onChunkReady = { requestSync() })
+        val notifySpeech = Runnable { if (!closing) chunks.onSpeechDetected() }
+        LiveAudioMonitor.start(this) {
+            if (!closing) runCatching { io.execute(notifySpeech) }
+        }
         ble = BleLink(
             this,
             onAudio = { seq, opus ->
@@ -135,7 +139,7 @@ class RecorderService : Service() {
     override fun onDestroy() {
         closing = true
         ble.stop()
-        LiveAudioMonitor.reset()
+        LiveAudioMonitor.stop()
         val ctx = applicationContext
         finishRecording(io, closeChunk = {
             try { chunks.closeChunk() }
