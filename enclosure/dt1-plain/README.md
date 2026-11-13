@@ -6,10 +6,9 @@
 |---|---|
 | `parts/case-front.stl` | 面盖 |
 | `parts/case-back.stl` | 底盒 |
-| `hark-dt1-plain-K3.3mf` | Creality Print 工程：K3、0.4mm 喷嘴、普通 PLA、首层 0.2mm 之后 0.16mm、3 墙、100% 填充、3mm brim、无支撑。估算约 24 分钟、5.8g |
 | `previews/` | 渲染图（渲染颜色不代表实际耗材颜色） |
 
-用 Creality Print 打开 3MF 时选「打开工程」，保持 100% 尺寸。其他打印机直接导入两个 STL：面盖正面朝下，底盒背面朝下。
+切片参数（在 Creality K3 上验证过）：0.4mm 喷嘴、普通 PLA、首层 0.2mm 之后 0.16mm、3 墙、100% 填充、3mm brim、无支撑，约 24 分钟、5.8g。导入两个 STL 时保持 100% 尺寸：面盖正面朝下，底盒背面朝下。
 
 接线、装配和注意事项见 [docs/hardware.md](../../docs/hardware.md)。
 

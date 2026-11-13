@@ -8,8 +8,9 @@
 |---|---|
 | `parts/case-front.stl` | 面盖（带刻纹） |
 | `parts/case-back.stl` | 底盒（结构和简易款相同） |
-| `hark-dt1-carved-K3.3mf` | Creality Print 工程，参数是按普通 PLA 切的。**换木粉 PLA 要重新切片**：喷嘴温度 205°C 左右，速度放慢 |
 | `previews/` | 渲染图 |
+
+切片参数和[简易款](../dt1-plain/)相同。用木粉 PLA 时，喷嘴温度调到 205°C 左右，速度放慢。
 
 接线、装配和注意事项见 [docs/hardware.md](../../docs/hardware.md)。
 
