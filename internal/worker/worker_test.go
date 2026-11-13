@@ -29,6 +29,7 @@ func TestFullE2EEPipelineSpeakerSeparationAndArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(mb.Close)
 	mbSrv := httptest.NewServer(mb.Handler())
 	defer mbSrv.Close()
 

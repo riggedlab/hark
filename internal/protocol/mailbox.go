@@ -54,6 +54,10 @@ type MailboxServer struct {
 	state    persistedState
 	inboxVer int
 	phoneVer int
+
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
+	closeOnce   sync.Once
 }
 
 func NewMailboxServer(cfg ServerConfig) (*MailboxServer, error) {
@@ -79,11 +83,13 @@ func NewMailboxServer(cfg ServerConfig) (*MailboxServer, error) {
 	}
 
 	s := &MailboxServer{
-		cfg:      cfg,
-		inboxDir: filepath.Join(cfg.DataDir, "inbox"),
-		outDir:   filepath.Join(cfg.DataDir, "outbox"),
-		slotDir:  filepath.Join(cfg.DataDir, "slots"),
-		notifyCh: make(chan struct{}),
+		cfg:         cfg,
+		inboxDir:    filepath.Join(cfg.DataDir, "inbox"),
+		outDir:      filepath.Join(cfg.DataDir, "outbox"),
+		slotDir:     filepath.Join(cfg.DataDir, "slots"),
+		notifyCh:    make(chan struct{}),
+		stopCleanup: make(chan struct{}),
+		cleanupDone: make(chan struct{}),
 		state: persistedState{
 			NextSeq:  1,
 			SlotVers: map[string]int{SlotWorkerStatus: 0, SlotSpeakersMac: 0, SlotSpeakersPhone: 0},
@@ -107,7 +113,31 @@ func NewMailboxServer(cfg ServerConfig) (*MailboxServer, error) {
 	s.mu.Lock()
 	s.cleanupLocked()
 	s.mu.Unlock()
+	go s.runCleanup()
 	return s, nil
+}
+
+func (s *MailboxServer) runCleanup() {
+	defer close(s.cleanupDone)
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCleanup:
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			s.cleanupLocked()
+			s.mu.Unlock()
+		}
+	}
+}
+
+// Close stops periodic cleanup and waits for any ongoing cleanup to finish.
+// It is safe to call more than once. HTTP handlers are shut down separately.
+func (s *MailboxServer) Close() {
+	s.closeOnce.Do(func() { close(s.stopCleanup) })
+	<-s.cleanupDone
 }
 
 func (s *MailboxServer) Handler() http.Handler {
@@ -198,6 +228,7 @@ func writeAtomic(path string, body []byte) error {
 	var suffix [4]byte
 	_, _ = rand.Read(suffix[:])
 	tmp := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s.%s.tmp", filepath.Base(path), hex.EncodeToString(suffix[:])))
+	defer os.Remove(tmp)
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		return err
 	}
@@ -232,19 +263,28 @@ func (s *MailboxServer) cleanupLocked() {
 	cleanExt(s.outDir, ".json")
 
 	now := time.Now()
-	cleanTTL := func(dir string, ttlDays float64, isInbox bool) {
+	cleanDir := func(dir string, ttlDays float64, isInbox bool) {
 		entries, _ := os.ReadDir(dir)
 		maxAge := time.Duration(ttlDays * float64(24*time.Hour))
 		for _, e := range entries {
-			if e.IsDir() || strings.HasSuffix(e.Name(), ".tmp") {
+			if e.IsDir() {
+				continue
+			}
+			isTemp := strings.HasSuffix(e.Name(), ".tmp")
+			ageLimit := maxAge
+			if isTemp {
+				ageLimit = 24 * time.Hour
+			} else if maxAge <= 0 {
 				continue
 			}
 			info, err := e.Info()
 			if err != nil {
 				continue
 			}
-			if now.Sub(info.ModTime()) > maxAge {
-				_ = os.Remove(filepath.Join(dir, e.Name()))
+			if now.Sub(info.ModTime()) > ageLimit {
+				if err := os.Remove(filepath.Join(dir, e.Name())); err != nil || isTemp {
+					continue
+				}
 				s.phoneVer++
 				if isInbox {
 					s.inboxVer++
@@ -253,8 +293,11 @@ func (s *MailboxServer) cleanupLocked() {
 			}
 		}
 	}
-	cleanTTL(s.inboxDir, s.cfg.AudioTTLDays, true)
-	cleanTTL(s.outDir, s.cfg.TextTTLDays, false)
+	cleanDir(s.inboxDir, s.cfg.AudioTTLDays, true)
+	cleanDir(s.outDir, s.cfg.TextTTLDays, false)
+	// Slots and state have no TTL; only reclaim their orphaned temporary files.
+	cleanDir(s.slotDir, 0, false)
+	cleanDir(s.cfg.DataDir, 0, false)
 }
 
 type outboxEntry struct {

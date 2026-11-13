@@ -351,6 +351,7 @@ func TestWorkerCLILegacyFlagsAndOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(mb.Close)
 	srv := httptest.NewServer(mb.Handler())
 	defer srv.Close()
 	key, err := e2ee.GenerateKey()
@@ -448,4 +449,3 @@ func TestSearchSessionWithCoSpeakerMatch(t *testing.T) {
 		t.Fatalf("expected real co-speaker matched segment, got %+v", got)
 	}
 }
-

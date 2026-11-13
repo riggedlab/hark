@@ -102,6 +102,11 @@ func OpenStore(dataDir string) (*Store, error) {
 		dataDir = DefaultDataDir()
 	}
 	dataDir = expandHome(dataDir)
+	// Keep the database path stable if the process later changes directory.
+	dataDir, err := filepath.Abs(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -569,9 +574,64 @@ func (s *Store) ExportJSON(f ArchiveFilter) (string, error) {
 func (s *Store) BackupTo(destPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = os.Remove(destPath)
-	_, err := s.db.Exec(`VACUUM INTO ?`, destPath)
-	return err
+
+	destPath, err := filepath.Abs(destPath)
+	if err != nil {
+		return fmt.Errorf("解析备份目标失败: %w", err)
+	}
+	dbPath, err := filepath.Abs(s.dbPath)
+	if err != nil {
+		return fmt.Errorf("解析当前数据库路径失败: %w", err)
+	}
+	realDBPath, err := filepath.EvalSymlinks(dbPath)
+	if err != nil {
+		return fmt.Errorf("解析当前数据库路径失败: %w", err)
+	}
+	destDir, err := filepath.EvalSymlinks(filepath.Dir(destPath))
+	if err != nil {
+		return fmt.Errorf("解析备份目录失败: %w", err)
+	}
+	realDestPath := filepath.Join(destDir, filepath.Base(destPath))
+	destInfo, err := os.Stat(destPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("检查备份目标失败: %w", err)
+	}
+	// Compare paths even when WAL/SHM files do not exist, and file identities
+	// for symlink and hard-link aliases of any active database file.
+	for _, path := range []string{dbPath, realDBPath} {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			activePath := path + suffix
+			if destPath == activePath || realDestPath == activePath {
+				return fmt.Errorf("备份目标不能是当前数据库或其 WAL/SHM 文件: %s", destPath)
+			}
+			info, err := os.Stat(activePath)
+			if err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("检查当前数据库文件失败: %w", err)
+			}
+			if destInfo != nil && info != nil && os.SameFile(destInfo, info) {
+				return fmt.Errorf("备份目标不能是当前数据库或其 WAL/SHM 文件: %s", destPath)
+			}
+		}
+	}
+
+	// VACUUM INTO accepts an empty existing file. Reserve a private name in the
+	// destination directory so the final rename stays on the same filesystem.
+	tmp, err := os.CreateTemp(destDir, ".hark-backup-*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建临时备份失败: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭临时备份失败: %w", err)
+	}
+	if _, err := s.db.Exec(`VACUUM INTO ?`, tmpPath); err != nil {
+		return fmt.Errorf("备份数据库失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		return fmt.Errorf("替换备份失败: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Stats() (ArchiveStats, error) {

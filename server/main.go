@@ -39,6 +39,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("hark-mailbox 配置错误: %v", err)
 	}
+	defer mb.Close()
 
 	srv := &http.Server{
 		Addr:              addr,
