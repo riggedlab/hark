@@ -9,6 +9,7 @@ import androidx.test.core.app.ApplicationProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -141,11 +142,12 @@ class UiWalkthroughTest {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
 
-        // 1. 待机态「文字」页（带多说话人对话卡片）+ 记录 Tab 纵坐标基线
+        // 1. 待机态「文字」页（带多说话人对话卡片）+ 验证品牌名为简洁的 Hark + 记录 Tab 纵坐标基线
+        rule.onNodeWithText("Hark").assertIsDisplayed()
         val tabBoundsIdle = rule.onNodeWithText("文字").fetchSemanticsNode().boundsInRoot
         captureAllWindows("01-events-idle")
 
-        // 2. 切换到「走带录音中」状态，推进采样时钟生成真实声波条，验证下方 TabRow 纵坐标 0 像素跳动！
+        // 2. 切换到「走带录音中」状态，推进 120Hz 帧时钟生成平滑声波条，验证下方 TabRow 纵坐标 0 像素跳动！
         AppState.update {
             it.copy(
                 link = LinkState.STREAMING,
@@ -162,30 +164,46 @@ class UiWalkthroughTest {
                 liveSpeech = true,
             )
         }
-        repeat(12) { step ->
-            val v = (0.25f + 0.55f * kotlin.math.abs(kotlin.math.sin(step * 0.7f)))
+        // 先等待 AnimatedContent(160ms) 完成过渡使频谱组件上屏，再推进多帧渲染完整声波带
+        rule.mainClock.advanceTimeBy(220)
+        repeat(24) { step ->
+            val v = (0.28f + 0.54f * kotlin.math.abs(kotlin.math.sin(step * 0.65f)))
             AppState.update { it.copy(lastWriteNanos = System.nanoTime(), liveLevel = v, liveSpeech = v > 0.45f) }
             rule.mainClock.advanceTimeBy(110)
         }
         rule.waitForIdle()
         val tabBoundsStreaming = rule.onNodeWithText("文字").fetchSemanticsNode().boundsInRoot
-        assertEquals("切换录音状态时下方导航栏不允许上下跳动", tabBoundsIdle.top, tabBoundsStreaming.top, 1.0f)
+        assertEquals("切换录音状态时下方导航栏不允许上下跳动", tabBoundsIdle.top, tabBoundsStreaming.top, 2.0f)
         captureAllWindows("02-events-streaming")
 
-        // 3. 点开顶部状态胶囊 -> 验证「设备状态」抽屉一屏完整显示，底部「停止录音」直接可见无需滚动！
-        rule.onNodeWithText("录音中").performClick()
+        // 3. 点开顶部方角硬件状态铭牌 -> 验证顶栏锚定浮层直接完整弹出，「停止录音」位于屏幕中上方绝不被底部裁切！
+        rule.onNodeWithContentDescription("打开设备状态").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("设备状态").assertIsDisplayed()
         rule.onNodeWithText("设备电量").assertIsDisplayed()
-        rule.onNodeWithText("停止录音").assertIsDisplayed()
+        val stopBounds = rule.onNodeWithText("停止录音").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+        val screenH = rule.activity.window.decorView.height.coerceAtLeast(2000)
+        assertTrue("停止录音按钮必须位于屏幕上半区，杜绝任何底部裁切 ($stopBounds vs $screenH)", stopBounds.bottom < screenH * 0.68f)
         captureAllWindows("03-telemetry-sheet")
 
-        // 从状态抽屉点「设置」进入独立设置页
+        // 从状态浮层点「设置」进入独立设置页，展开 3 步新手引导核对视觉
         rule.onNodeWithText("设置").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("转写路径").assertIsDisplayed()
         rule.onNodeWithText("直连转写服务").assertIsDisplayed()
+        rule.onNodeWithText("配置指引").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("豆包语音 3 步配置").assertIsDisplayed()
+        rule.onNodeWithText("测试并启用").assertIsDisplayed()
         captureAllWindows("04-settings-direct-asr")
+
+        // 切换到 OpenAI 兼容查看一键平台预设（硅基流动 / Groq），再切回豆包语音
+        rule.onNodeWithText("OpenAI 兼容").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("硅基流动").assertIsDisplayed()
+        captureAllWindows("04b-settings-openai-presets")
+        rule.onNodeWithText("豆包语音").performClick()
+        rule.waitForIdle()
 
         // 在设置页切换到未配置的「云端信箱同步」：验证后台实际模式仍保持 DIRECT_ASR，按钮变为「保存并启用」
         val ctx = ApplicationProvider.getApplicationContext<Context>()

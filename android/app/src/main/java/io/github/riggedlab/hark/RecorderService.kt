@@ -46,8 +46,10 @@ class RecorderService : Service() {
                         if (chunks.onPacket(seq, opus)) {
                             bytesThisSecond += opus.size
                             val writtenAt = chunks.lastWriteNanos
-                            if (AppState.status.value.lastWriteNanos != writtenAt)
+                            val prev = AppState.status.value.lastWriteNanos
+                            if (writtenAt != 0L && (prev == 0L || writtenAt - prev >= 400_000_000L)) {
                                 AppState.update { it.copy(lastWriteNanos = writtenAt) }
+                            }
                             LiveAudioMonitor.offer(seq, opus)
                         }
                     } catch (_: Exception) {
@@ -185,7 +187,7 @@ class RecorderService : Service() {
         }
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle("Hark · 谛听")
+            .setContentTitle("Hark")
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)

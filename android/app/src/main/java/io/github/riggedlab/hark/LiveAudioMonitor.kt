@@ -20,7 +20,91 @@ import kotlin.math.sqrt
 
 /** 只分析已交给文件写入器的帧。录音线程只做非阻塞 offer，不持有解码器/VAD 的锁。 */
 object LiveAudioMonitor {
+    private const val HISTORY_SIZE = 72
+    private const val BAR_INTERVAL_NS = 95_000_000L // ~10.5 根声柱/秒，配合 UI 端 120Hz 亚像素连续平移
+
     @Volatile private var active: Worker? = null
+    /** 50Hz 无锁实时声压（0f..1f），供 120Hz Canvas 直接读取，避免每秒 10 次触发全局 Compose 重组 */
+    @Volatile var realtimeLevel: Float = 0f
+        private set
+    @Volatile var lastPcmNanos: Long = 0L
+        private set
+
+    private val ringLock = Any()
+    private val historyRing = FloatArray(HISTORY_SIZE)
+    private var ringHead = 0
+    private var ringFilled = 0
+    private var lastBarNanos = 0L
+
+    fun currentLevel(nowNanos: Long, fallback: Float? = null): Float {
+        val pcmAt = lastPcmNanos
+        if (pcmAt != 0L && nowNanos - pcmAt < 450_000_000L) return realtimeLevel
+        return fallback ?: 0f
+    }
+
+    /** 读取最近声柱快照与当前柱内亚像素进度（0f..1f），锁屏解锁或从设置页返回立刻满屏连续显示 */
+    fun readSpectrum(nowNanos: Long, outNewestFirst: FloatArray, fallback: Float? = null): Pair<Int, Float> {
+        synchronized(ringLock) {
+            if (ringFilled == 0 && fallback != null && fallback > 0.02f) {
+                val n = minOf(outNewestFirst.size, 28)
+                for (i in 0 until n) {
+                    val wave = (0.55f + 0.45f * kotlin.math.abs(kotlin.math.sin(i * 0.62f)))
+                    outNewestFirst[i] = (fallback * wave).coerceIn(0f, 1f)
+                }
+                return n to 0f
+            }
+            val count = minOf(ringFilled, outNewestFirst.size)
+            for (i in 0 until count) {
+                val idx = (ringHead - 1 - i + HISTORY_SIZE * 2) % HISTORY_SIZE
+                outNewestFirst[i] = historyRing[idx]
+            }
+            val frac = if (lastBarNanos == 0L) 0f
+            else ((nowNanos - lastBarNanos).toFloat() / BAR_INTERVAL_NS).coerceIn(0f, 1f)
+            return count to frac
+        }
+    }
+
+    private fun pushBarSample(level: Float, nowNanos: Long) {
+        synchronized(ringLock) {
+            if (lastBarNanos == 0L) {
+                lastBarNanos = nowNanos
+                historyRing[ringHead] = level
+                ringHead = (ringHead + 1) % HISTORY_SIZE
+                if (ringFilled < HISTORY_SIZE) ringFilled++
+                return
+            }
+            var steps = ((nowNanos - lastBarNanos) / BAR_INTERVAL_NS).toInt()
+            if (steps <= 0) {
+                // 同一柱周期内保留峰值，说话短促音节不漏帧
+                val prevIdx = (ringHead - 1 + HISTORY_SIZE) % HISTORY_SIZE
+                if (ringFilled > 0 && level > historyRing[prevIdx]) {
+                    historyRing[prevIdx] = level
+                }
+                return
+            }
+            if (steps > 6) {
+                steps = 1
+                lastBarNanos = nowNanos
+            } else {
+                lastBarNanos += steps * BAR_INTERVAL_NS
+            }
+            repeat(steps) { step ->
+                val v = if (step == steps - 1) level else 0f
+                historyRing[ringHead] = v
+                ringHead = (ringHead + 1) % HISTORY_SIZE
+                if (ringFilled < HISTORY_SIZE) ringFilled++
+            }
+        }
+    }
+
+    private fun resetRing() {
+        synchronized(ringLock) {
+            historyRing.fill(0f)
+            ringHead = 0
+            ringFilled = 0
+            lastBarNanos = 0L
+        }
+    }
 
     fun start(context: Context) {
         if (active != null) return
@@ -43,8 +127,14 @@ object LiveAudioMonitor {
 
     fun offer(seq: Int, opus: ByteArray) { active?.offer(seq, opus) }
 
-    private fun clearStatus() = AppState.update {
-        it.copy(liveLevel = null, liveSpeech = false, liveUnavailable = false)
+    private fun clearStatus() {
+        realtimeLevel = 0f
+        lastPcmNanos = 0L
+        resetRing()
+        AppState.update {
+            if (it.liveLevel == null && !it.liveSpeech && !it.liveUnavailable) it
+            else it.copy(liveLevel = null, liveSpeech = false, liveUnavailable = false)
+        }
     }
 
     private data class Packet(val seq: Int, val opus: ByteArray, val epoch: Int, val at: Long)
@@ -90,6 +180,8 @@ object LiveAudioMonitor {
                 sampleCount = 0
                 level = 0f
                 lastPcm = 0L
+                realtimeLevel = 0f
+                lastPcmNanos = 0L
             }
 
             fun sample(value: Float) {
@@ -98,10 +190,14 @@ object LiveAudioMonitor {
                 sampleCount++
                 if (sampleCount == 320) {
                     val db = 20.0 * log10(sqrt(squares / sampleCount).coerceAtLeast(0.000001))
-                    level = ((db + 60.0) / 60.0).toFloat().coerceIn(0f, 1f)
+                    level = ((db + 56.0) / 52.0).toFloat().coerceIn(0f, 1f)
                     squares = 0.0
                     sampleCount = 0
-                    lastPcm = System.nanoTime()
+                    val t = System.nanoTime()
+                    lastPcm = t
+                    realtimeLevel = level
+                    lastPcmNanos = t
+                    pushBarSample(level, t)
                 }
                 if (vad?.accept(value) == true) lastSpeech = System.nanoTime()
             }
@@ -138,14 +234,20 @@ object LiveAudioMonitor {
                         vad = null
                     }
                     val now = System.nanoTime()
-                    if (now - lastPublish >= 100_000_000L && active === this && seenEpoch == epoch.get()) {
+                    if (now - lastPcm >= BAR_INTERVAL_NS && active === this && seenEpoch == epoch.get() && !failed) {
+                        pushBarSample(0f, now)
+                    }
+                    if (now - lastPublish >= 250_000_000L && active === this && seenEpoch == epoch.get()) {
                         lastPublish = now
-                        AppState.update {
-                            if (active !== this || seenEpoch != epoch.get()) it else it.copy(
-                                liveLevel = if (failed) null else if (now - lastPcm < 500_000_000L) level else 0f,
-                                liveSpeech = !failed && lastSpeech != 0L && now - lastSpeech < 1_000_000_000L,
-                                liveUnavailable = failed,
-                            )
+                        val speechNow = !failed && lastSpeech != 0L && now - lastSpeech < 1_000_000_000L
+                        val cur = AppState.status.value
+                        if (cur.liveSpeech != speechNow || cur.liveUnavailable != failed) {
+                            AppState.update {
+                                if (active !== this || seenEpoch != epoch.get()) it else it.copy(
+                                    liveSpeech = speechNow,
+                                    liveUnavailable = failed,
+                                )
+                            }
                         }
                     }
                 }

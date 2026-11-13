@@ -21,6 +21,24 @@ class Uploader(private val ctx: Context) {
     fun isSilent(f: File) = File(silentDir, f.name).exists()
     fun isSkippedBadAudio(f: File) = (badFileFailures[f.name] ?: 0) >= MAX_BAD_FILE_ATTEMPTS
 
+    /** 后台一次性枚举标记集合，避免列表渲染时逐卡片调用 File.exists() */
+    data class MarkSnapshot(
+        val uploaded: Set<String>,
+        val silent: Set<String>,
+        val badAudio: Set<String>,
+        val unuploadedCount: Int,
+    )
+
+    fun snapshotMarks(): MarkSnapshot {
+        val up = (markDir.list() ?: emptyArray()).toHashSet()
+        val sil = (silentDir.list() ?: emptyArray()).toHashSet()
+        val bad = badFileFailures.filterValues { it >= MAX_BAD_FILE_ATTEMPTS }.keys.toHashSet()
+        val unuploaded = (chunkDir.list() ?: emptyArray()).count { name ->
+            name.endsWith(".opus") && name !in up && name !in sil
+        }
+        return MarkSnapshot(uploaded = up, silent = sil, badAudio = bad, unuploadedCount = unuploaded)
+    }
+
     /** 按当前工作模式处理待办片段，返回 (本次完成数, 剩余待处理数) */
     fun processPending(): Pair<Int, Int> = when (Config.mode(ctx)) {
         WorkMode.CLOUD -> uploadPending()

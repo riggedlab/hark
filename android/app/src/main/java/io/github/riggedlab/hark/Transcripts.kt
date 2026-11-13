@@ -1,11 +1,15 @@
 package io.github.riggedlab.hark
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+@Immutable
 data class Segment(val start: Double, val end: Double, val text: String, val speaker: String? = null)
+
+@Immutable
 data class Transcript(val name: String, val durationSec: Double, val text: String, val segments: List<Segment>)
 
 /**
@@ -14,22 +18,36 @@ data class Transcript(val name: String, val durationSec: Double, val text: Strin
  */
 object Transcripts {
     private val mem = ConcurrentHashMap<String, Transcript>()
+    private val missing = ConcurrentHashMap.newKeySet<String>()
 
     fun dir(ctx: Context) = File(ctx.filesDir, "texts").apply { mkdirs() }
 
-    /** 某段录音（文件名 xxx.opus）对应的文字，没有就返回 null */
-    fun get(ctx: Context, name: String): Transcript? = mem[name] ?: File(dir(ctx), "$name.json")
-        .takeIf { it.exists() }?.let { runCatching { parse(JSONObject(it.readText())) }.getOrNull() }
-        ?.also { mem[name] = it }
+    /** 某段录音（文件名 xxx.opus）对应的文字，正负结果均缓存于内存，避免滚动时重复触发磁盘 syscall */
+    fun get(ctx: Context, name: String): Transcript? {
+        mem[name]?.let { return it }
+        if (missing.contains(name)) return null
+        val file = File(dir(ctx), "$name.json")
+        if (!file.exists()) {
+            missing.add(name)
+            return null
+        }
+        val parsed = runCatching { parse(JSONObject(file.readText())) }.getOrNull()
+        if (parsed != null) mem[name] = parsed
+        return parsed
+    }
 
-    fun allNames(ctx: Context): List<String> =
-        dir(ctx).listFiles { f -> f.name.endsWith(".json") }?.map { it.name.removeSuffix(".json") } ?: emptyList()
+    fun allNames(ctx: Context): List<String> {
+        val names = dir(ctx).list()?.filter { it.endsWith(".json") }?.map { it.removeSuffix(".json") } ?: emptyList()
+        if (missing.isNotEmpty()) missing.removeAll(names.toSet())
+        return names
+    }
 
     fun save(ctx: Context, value: JSONObject) {
         val name = value.getString("name")
         require(Crypto.audioName.matches(name)) { "录音文件名格式错误" }
         Sync.writeFile(File(dir(ctx), "$name.json"), value.toString())
         mem.remove(name)
+        missing.remove(name)
     }
 
     private fun parse(o: JSONObject): Transcript {

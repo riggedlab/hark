@@ -1,5 +1,6 @@
 package io.github.riggedlab.hark
 
+import androidx.compose.runtime.Immutable
 import java.io.File
 import java.io.RandomAccessFile
 import java.time.LocalDate
@@ -8,10 +9,15 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 
 /** 一段录音：文件名就是开始时间（yyyyMMdd-HHmmss.opus）。音频可能已经过期删除，只剩文字。 */
-data class Recording(val file: File, val start: LocalDateTime, val durationSec: Double) {
-    val name: String get() = file.name
-    val hasAudio: Boolean get() = file.exists()
-    val end: LocalDateTime get() = start.plusSeconds(durationSec.toLong())
+@Immutable
+data class Recording(
+    val file: File,
+    val start: LocalDateTime,
+    val durationSec: Double,
+    val hasAudio: Boolean = file.exists(),
+) {
+    val name: String = file.name
+    val end: LocalDateTime = start.plusSeconds(durationSec.toLong())
 }
 
 object Recordings {
@@ -22,17 +28,24 @@ object Recordings {
     fun parseStart(f: File): LocalDateTime? =
         runCatching { LocalDateTime.parse(f.name.removeSuffix(".opus"), NAME_FMT) }.getOrNull()
 
-    /** 列出所有录音（含只剩文字的），新的在前 */
+    /** 列出所有录音（含只剩文字的），新的在前；文件存在性与时长均在后台线程一次性缓存 */
     fun list(ctx: android.content.Context): List<Recording> {
         val dir = RecorderService.chunkDir(ctx)
-        val audio = (dir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray()).map { it.name }
-        val names = (audio + Transcripts.allNames(ctx)).toSortedSet()
+        val audioSet = (dir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
+            .associateBy { it.name }
+        val textNames = Transcripts.allNames(ctx)
+        val names = HashSet<String>(audioSet.size + textNames.size).apply {
+            addAll(audioSet.keys)
+            addAll(textNames)
+        }
         return names.mapNotNull { name ->
-            val f = File(dir, name)
+            val audioFile = audioSet[name]
+            val f = audioFile ?: File(dir, name)
+            val exists = audioFile != null
             val start = parseStart(f) ?: return@mapNotNull null
-            val dur = if (f.exists()) durationCache.getOrPut("${f.name}:${f.length()}") { oggDurationSec(f) }
+            val dur = if (exists) durationCache.getOrPut("${f.name}:${f.length()}") { oggDurationSec(f) }
                       else Transcripts.get(ctx, name)?.durationSec ?: 0.0
-            Recording(f, start, dur)
+            Recording(f, start, dur, hasAudio = exists)
         }.sortedByDescending { it.start }
     }
 
