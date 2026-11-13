@@ -22,7 +22,6 @@ import androidx.activity.result.contract.ActivityResultContracts.RequestMultiple
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
@@ -40,7 +39,6 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -48,16 +46,19 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
+import androidx.compose.material.icons.automirrored.rounded.MergeType
+import androidx.compose.material.icons.automirrored.rounded.Notes
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -66,13 +67,10 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -88,7 +86,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -112,11 +109,10 @@ import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
-import kotlin.math.sin
 
-private enum class RootDestination { MAIN, SETTINGS }
+private enum class RootDestination { MAIN, RECORDINGS, SETTINGS }
 
-// ───────────────────── 后台预构建的 @Immutable 视图模型（主线程零磁盘 I/O、零无效重组） ─────────────────────
+// ───────────────────── 后台预构建的 @Immutable 记忆流视图模型（主线程零磁盘 I/O） ─────────────────────
 
 @Immutable
 internal data class LineUi(
@@ -128,39 +124,93 @@ internal data class LineUi(
 
 @Immutable
 internal data class ParaUi(
+    val key: String,
     val lines: List<LineUi>,
     val who: String?,
     val speakerId: String?,
+    val isSelf: Boolean,
     val text: String,
     val textLower: String,
     val whoLower: String?,
+    val timeHm: String,
+    val durationSec: Int,
     val hasAnyAudio: Boolean,
     val avgDb: Float?,
     val proximity: String?,
-    val proxBadgeLabel: String?,
+    val voiceCue: String?,
+    val affectCue: String?,
+    val isPositive: Boolean,
+    val isTense: Boolean,
     val isBackgroundNoise: Boolean,
-    val mood: String?,
-    val moodScore: Float?,
-    val vocalTags: List<String>,
 )
 
 @Immutable
 internal data class EventUi(
     val key: String,
     val day: LocalDate,
+    val startAt: LocalDateTime,
+    val endAt: LocalDateTime,
+    val startHm: String,
     val timeLabel: String,
+    val durationLabel: String?,
     val place: Place?,
+    val peopleList: List<String>,
     val peopleText: String,
-    val avgDb: Float?,
-    val speakerLevelsSummary: String?,
+    val headline: String,
+    val previewQuote: String,
+    val isCompactNote: Boolean,
     val sceneSummary: String?,
-    val mood: String?,
-    val moodScore: Float?,
-    val vocalTags: List<String>,
+    val eventVoiceCue: String?,
+    val eventAffectCue: String?,
+    val isPositive: Boolean,
+    val isTense: Boolean,
     val paras: List<ParaUi>,
+    val fgParaCount: Int,
+    val bgParaCount: Int,
     val firstAudioLine: LineUi?,
     val copyText: String,
     val searchBlob: String,
+)
+
+@Immutable
+internal data class AmbientSpanUi(
+    val key: String,
+    val day: LocalDate,
+    val startAt: LocalDateTime,
+    val startHm: String,
+    val spanLabel: String,
+    val summaryText: String,
+    val searchBlob: String,
+)
+
+@Immutable
+internal sealed interface StreamNodeUi {
+    val key: String
+    val sortTime: LocalDateTime
+    val searchBlob: String
+
+    @Immutable
+    data class Conversation(val event: EventUi) : StreamNodeUi {
+        override val key: String get() = event.key
+        override val sortTime: LocalDateTime get() = event.startAt
+        override val searchBlob: String get() = event.searchBlob
+    }
+
+    @Immutable
+    data class Ambient(val span: AmbientSpanUi) : StreamNodeUi {
+        override val key: String get() = span.key
+        override val sortTime: LocalDateTime get() = span.startAt
+        override val searchBlob: String get() = span.searchBlob
+    }
+}
+
+@Immutable
+internal data class DayDigestStats(
+    val talkMinutes: Int,
+    val peopleCount: Int,
+    val mutedNoiseCount: Int,
+    val vibeLabel: String,
+    val vibePositive: Boolean,
 )
 
 @Immutable
@@ -168,7 +218,9 @@ internal data class DayEventsGroup(
     val day: LocalDate,
     val title: String,
     val countLabel: String,
+    val digest: DayDigestStats,
     val events: List<EventUi>,
+    val nodes: List<StreamNodeUi>,
 )
 
 internal enum class BaseChunkStatus {
@@ -189,8 +241,8 @@ internal data class RecordingCardUi(
     val durationLabel: String,
     val placeLabel: String?,
     val sceneSummary: String?,
-    val mood: String?,
-    val moodScore: Float?,
+    val affectCue: String?,
+    val isPositive: Boolean,
     val transcriptPreview: String?,
     val baseStatus: BaseChunkStatus,
     val searchBlob: String,
@@ -207,6 +259,7 @@ internal data class DayRecordingsGroup(
 @Immutable
 internal data class PersonCardUi(
     val speaker: Speaker,
+    val isSelf: Boolean,
     val count: Int,
     val aliases: List<Speaker>,
     val quote: String?,
@@ -221,6 +274,12 @@ internal data class PlaceCardUi(
 )
 
 @Immutable
+internal data class FeedFilterLens(
+    val id: String,
+    val label: String,
+)
+
+@Immutable
 internal data class ArchiveSnapshot(
     val signature: String = "",
     val recs: List<Recording> = emptyList(),
@@ -230,6 +289,7 @@ internal data class ArchiveSnapshot(
     val people: List<PersonCardUi> = emptyList(),
     val unnamedPeopleCount: Int = 0,
     val places: List<PlaceCardUi> = emptyList(),
+    val quickLenses: List<FeedFilterLens> = emptyList(),
 )
 
 @Immutable
@@ -238,16 +298,6 @@ private data class HeaderStatusSlice(
     val batteryPct: Int?,
     val hasWarning: Boolean,
     val transcribing: Boolean,
-)
-
-@Immutable
-private data class DeckStatusSlice(
-    val link: LinkState,
-    val message: String?,
-    val chunkSec: Int,
-    val written: Boolean,
-    val liveUnavailable: Boolean,
-    val fallbackLevel: Float?,
 )
 
 @Immutable
@@ -366,17 +416,34 @@ class MainActivity : ComponentActivity() {
         return cur
     }
 
+    private fun detectSelfSpeakerIds(roster: Map<String, Speaker>): Set<String> {
+        val explicit = roster.values
+            .filter { it.mergedInto == null && isSelfDisplayName(it.name) }
+            .map { it.id }
+            .toSet()
+        if (explicit.isNotEmpty()) return explicit
+        // 若尚未手动命名「我」，默认将桌面端主声纹 spk_001 / spk_01 识别为佩戴者本人（若其尚未改成他人名字）
+        val fallback = roster.values.firstOrNull {
+            it.mergedInto == null && (it.id == "spk_001" || it.id == "spk_01") && it.name == null
+        }
+        return if (fallback != null) setOf(fallback.id) else emptySet()
+    }
+
     private fun buildArchiveSnapshot(sig: String): ArchiveSnapshot {
         val recs = Recordings.list(this)
         val marks = uploader.snapshotMarks()
         val roster = Speakers.all(this)
+        val selfIds = detectSelfSpeakerIds(roster)
+        val transcribedNames = HashSet<String>(recs.size)
 
-        // 1. 构建文字时间线 EventUi
+        // 1. 构建全天对话流 EventUi
         val lines = ArrayList<LineUi>(recs.size * 4)
         for (r in recs.asReversed()) {
             val tr = Transcripts.get(this, r.name) ?: continue
+            var hasSeg = false
             for (seg in tr.segments) {
                 if (seg.text.isNotBlank()) {
+                    hasSeg = true
                     lines.add(
                         LineUi(
                             rec = r,
@@ -387,6 +454,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+            if (hasSeg) transcribedNames.add(r.name)
         }
         lines.sortBy { it.at }
 
@@ -407,13 +475,23 @@ class MainActivity : ComponentActivity() {
                 val rawSpk = l.seg.speaker
                 val resolved = if (roster.isNotEmpty()) resolveInRoster(rawSpk, roster) else null
                 val localIdx = rawSpk?.removePrefix("other_")?.toIntOrNull()
-                val meta = when {
-                    resolved != null -> Triple(resolved.name ?: resolved.defaultName, resolved.id, "global:${resolved.id}")
+                val dispName = when {
+                    resolved != null -> when {
+                        resolved.name != null -> resolved.name
+                        resolved.id in selfIds -> "我"
+                        else -> resolved.defaultName
+                    }
+                    rawSpk in selfIds -> "我"
                     localIdx != null -> {
                         val dispNum = if (localIdx <= 0) localIdx + 1 else localIdx
-                        Triple("对话人 $dispNum", null, "local:${l.rec.name}:$localIdx")
+                        "对话人 $dispNum"
                     }
-                    rawSpk != null -> Triple(null, null, "raw:${l.rec.name}:$rawSpk")
+                    else -> null
+                }
+                val meta = when {
+                    resolved != null -> Triple(dispName, resolved.id, "global:${resolved.id}")
+                    localIdx != null -> Triple(dispName, null, "local:${l.rec.name}:$localIdx")
+                    rawSpk != null -> Triple(dispName, null, "raw:${l.rec.name}:$rawSpk")
                     else -> Triple(null, null, "unknown")
                 }
                 val lastLines = paras.lastOrNull()
@@ -421,7 +499,7 @@ class MainActivity : ComponentActivity() {
                 val gap = lastLines?.let { Duration.between(it.last().endAt, l.at).toMillis() / 1000.0 }
                 val prevDb = lastLines?.last()?.seg?.db
                 val curDb = l.seg.db
-                val dbConsistent = prevDb == null || curDb == null || abs(prevDb - curDb) < 5.0f
+                val dbConsistent = prevDb == null || curDb == null || abs(prevDb - curDb) < 6.0f
                 val prevProx = lastLines?.last()?.seg?.proximity
                 val curProx = l.seg.proximity
                 val proxConsistent = prevProx == null || curProx == null || prevProx == curProx
@@ -429,44 +507,50 @@ class MainActivity : ComponentActivity() {
                 val curMood = l.seg.mood
                 val oppositePolarity = (prevMood == "positive" && curMood == "negative") ||
                     (prevMood == "negative" && curMood == "positive")
-                val moodConsistent = !oppositePolarity && (
-                    prevMood == null || curMood == null || prevMood == curMood ||
-                        abs((lastLines.last().seg.moodScore ?: 0f) - (l.seg.moodScore ?: 0f)) < 0.42f
-                    )
-                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S && dbConsistent && proxConsistent && moodConsistent) {
+                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S && dbConsistent && proxConsistent && !oppositePolarity) {
                     lastLines.add(l)
                 } else {
                     paras.add(mutableListOf(l))
                     paraMeta.add(meta)
                 }
             }
+
             val paraUis = paras.mapIndexed { idx, pLines ->
                 val (who, spkId, _) = paraMeta[idx]
+                val isSelf = (spkId != null && spkId in selfIds) || isSelfDisplayName(who)
                 val joined = pLines.joinToString("") { it.seg.text.trim() }
                 val avgDb = computeEnergyWeightedDb(pLines)
                 val prox = computeDominantProximity(pLines)
-                val badge = proximityCnBadge(prox, avgDb)
-                val protectedSpk = Proximity.isProtectedSpeakerId(spkId, roster)
+                val protectedSpk = isSelf || Proximity.isProtectedSpeakerId(spkId, roster)
                 val isBg = (prox == Proximity.FAR || prox == Proximity.MEDIA) && !protectedSpk
                 val moodPair = computeWeightedMood(pLines)
                 val vTags = pLines.mapNotNull { it.seg.vocalTag }.distinct().take(2)
+                val vCue = humanVoiceCue(prox, avgDb)
+                val aCue = humanAffectCue(moodPair?.first, moodPair?.second, vTags)
+                val firstL = pLines.first()
+                val durS = (pLines.last().seg.end - firstL.seg.start).roundToInt().coerceAtLeast(1)
                 ParaUi(
+                    key = "p_${firstL.rec.name}_${firstL.seg.start}_$idx",
                     lines = pLines,
                     who = who,
                     speakerId = spkId,
+                    isSelf = isSelf,
                     text = joined,
                     textLower = joined.lowercase(),
                     whoLower = who?.lowercase(),
+                    timeHm = firstL.at.format(HM),
+                    durationSec = durS,
                     hasAnyAudio = pLines.any { it.rec.hasAudio },
                     avgDb = avgDb,
                     proximity = prox,
-                    proxBadgeLabel = badge,
+                    voiceCue = vCue,
+                    affectCue = aCue,
+                    isPositive = moodPair?.first == "positive" || "笑声" in vTags,
+                    isTense = moodPair?.first == "negative",
                     isBackgroundNoise = isBg,
-                    mood = moodPair?.first,
-                    moodScore = moodPair?.second,
-                    vocalTags = vTags,
                 )
             }
+
             val fgParas = paraUis.filter { !it.isBackgroundNoise }
             val mainParas = fgParas.ifEmpty { paraUis }
             val mainLines = mainParas.flatMap { it.lines }
@@ -476,114 +560,186 @@ class MainActivity : ComponentActivity() {
             val sHm = start.format(HM)
             val eHm = end.format(HM)
             val timeLabel = if (sHm == eHm) sHm else "$sHm – $eHm"
+            val spanMin = Duration.between(start, end).seconds / 60
+            val durationLabel = if (spanMin >= 1) "${spanMin} 分钟" else null
             val place = Places.at(this, start)
-            val sceneTags = aggregateSceneTags(
+            val rawSceneTags = aggregateSceneTags(
                 g.map { it.rec.name }.distinct().map { SceneAndMood.getSceneTags(this, it) }.filter { it.isNotEmpty() },
             )
-            val sceneSummary = formatSceneTags(sceneTags)
-            val eventMoodPair = computeWeightedMood(mainLines)
             val eventVocalTags = mainLines.mapNotNull { it.seg.vocalTag }.distinct().take(2)
-            val peopleList = mainParas.mapNotNull { it.who }.distinct()
-            val peopleWithLevels = run {
-                val byWho = LinkedHashMap<String, MutableList<LineUi>>()
-                for (p in mainParas) {
-                    val w = p.who ?: continue
-                    byWho.getOrPut(w) { ArrayList() }.addAll(p.lines)
-                }
-                if (byWho.isEmpty()) ""
-                else {
-                    val entries = byWho.map { (w, ls) ->
-                        w to computeEnergyWeightedDb(ls)
-                    }
-                    val sorted = if (entries.any { it.second != null }) {
-                        entries.sortedByDescending { it.second ?: -99f }
-                    } else entries
-                    sorted.joinToString(" · ") { (w, db) ->
-                        if (db != null) "$w ${formatDb(db)}" else w
-                    }
-                }
-            }
-            val peopleText = peopleList.joinToString("、")
+            val sceneSummary = formatCleanSceneTags(rawSceneTags, excludeLaugh = "笑声" in eventVocalTags)
+            val eventMoodPair = computeWeightedMood(mainLines)
             val eventAvgDb = computeEnergyWeightedDb(mainLines)
+            val eventDomProx = computeDominantProximity(mainLines)
+            val eventVoiceCue = humanVoiceCue(eventDomProx, eventAvgDb)
+            val eventAffectCue = humanAffectCue(eventMoodPair?.first, eventMoodPair?.second, eventVocalTags)
+
+            val peopleList = mainParas.mapNotNull { it.who }.distinct()
+            val peopleText = peopleList.joinToString("、")
+            val nonSelfPeople = peopleList.filterNot { isSelfDisplayName(it) }
+            val totalChars = mainParas.sumOf { it.text.length }
+            val isCompactNote = mainParas.size <= 1 && totalChars <= 88
+            val headline = when {
+                nonSelfPeople.size == 1 -> "与 ${nonSelfPeople[0]} 的对话"
+                nonSelfPeople.size == 2 -> "与 ${nonSelfPeople[0]}、${nonSelfPeople[1]} 的对话"
+                nonSelfPeople.size > 2 -> "与 ${nonSelfPeople[0]}、${nonSelfPeople[1]} 等 ${nonSelfPeople.size} 人对话"
+                mainParas.all { it.isSelf } -> "随口独白"
+                else -> "对话记录"
+            }
+            val bestPara = mainParas.maxByOrNull { it.text.length } ?: mainParas.first()
+            val previewQuote = bestPara.text.let { t ->
+                if (t.length <= 72) t else t.take(70).trimEnd('，', '。', '、', ' ') + "…"
+            }
+
+            // 干净的人类可读复制格式（不含工程分贝或情绪小数）
             val copyText = buildString {
                 append("[").append(day.format(MD)).append(" ").append(if (sHm == eHm) sHm else "$sHm–$eHm")
                 place?.let { append(" · ").append(it.label) }
-                sceneSummary?.let { append(" · 环境: ").append(it) }
+                sceneSummary?.let { append(" · ").append(it) }
                 append("]\n")
                 for (p in mainParas) {
-                    val metaParts = buildList {
-                        p.avgDb?.let { add(formatDb(it)) }
-                        p.proxBadgeLabel?.let { add(it) }
-                        if (p.mood != null && p.moodScore != null) {
-                            add("${moodCnLabel(p.mood)} ${formatMoodScore(p.moodScore)}")
-                        }
-                        if (p.vocalTags.isNotEmpty()) add(p.vocalTags.joinToString("/"))
-                    }
+                    val cues = listOfNotNull(p.voiceCue, p.affectCue)
                     if (p.who != null) {
                         append(p.who)
-                        if (metaParts.isNotEmpty()) append(" (").append(metaParts.joinToString(" · ")).append(")")
+                        if (cues.isNotEmpty()) append(" (").append(cues.joinToString(" · ")).append(")")
                         append("：")
-                    } else if (metaParts.isNotEmpty()) {
-                        append("(").append(metaParts.joinToString(" · ")).append(") ")
+                    } else if (cues.isNotEmpty()) {
+                        append("(").append(cues.joinToString(" · ")).append(") ")
                     }
-                    if (p.lines.size <= 1) {
-                        append(p.text)
-                    } else {
-                        p.lines.forEachIndexed { i, l ->
-                            if (i > 0) append(' ')
-                            append(l.seg.text.trim())
-                            l.seg.db?.let { append(" [").append(formatDb(it)).append("]") }
-                        }
-                    }
-                    append("\n")
+                    append(p.text).append('\n')
                 }
             }.trimEnd()
+
             val searchBlob = buildString {
                 place?.label?.let { append(it.lowercase()).append('\n') }
-                sceneTags.forEach { append(it.label.lowercase()).append('\n') }
-                eventMoodPair?.let { append(moodCnLabel(it.first)).append('\n') }
+                rawSceneTags.forEach { append(it.label.lowercase()).append('\n') }
                 for (p in paraUis) {
-                    p.proxBadgeLabel?.let { append(it.lowercase()).append('\n') }
-                    p.mood?.let { append(moodCnLabel(it)).append('\n') }
-                    p.vocalTags.forEach { append(it.lowercase()).append('\n') }
+                    p.voiceCue?.let { append(it.lowercase()).append('\n') }
+                    p.affectCue?.let { append(it.lowercase()).append('\n') }
                 }
                 if (peopleText.isNotEmpty()) append(peopleText.lowercase()).append('\n')
                 for (p in paraUis) append(p.textLower).append('\n')
             }
+
             val firstLine = g.first()
             EventUi(
                 key = "e_${firstLine.rec.name}_${firstLine.seg.start}",
                 day = day,
+                startAt = start,
+                endAt = end,
+                startHm = sHm,
                 timeLabel = timeLabel,
+                durationLabel = durationLabel,
                 place = place,
+                peopleList = peopleList,
                 peopleText = peopleText,
-                avgDb = eventAvgDb,
-                speakerLevelsSummary = peopleWithLevels.ifEmpty { null },
+                headline = headline,
+                previewQuote = previewQuote,
+                isCompactNote = isCompactNote,
                 sceneSummary = sceneSummary,
-                mood = eventMoodPair?.first,
-                moodScore = eventMoodPair?.second,
-                vocalTags = eventVocalTags,
+                eventVoiceCue = eventVoiceCue,
+                eventAffectCue = eventAffectCue,
+                isPositive = eventMoodPair?.first == "positive" || "笑声" in eventVocalTags,
+                isTense = eventMoodPair?.first == "negative",
                 paras = paraUis,
+                fgParaCount = fgParas.size,
+                bgParaCount = paraUis.size - fgParas.size,
                 firstAudioLine = g.firstOrNull { it.rec.hasAudio },
                 copyText = copyText,
                 searchBlob = searchBlob,
             )
         }
 
-        val dayEvents = allEvents
-            .groupBy { it.day }
-            .entries
-            .sortedByDescending { it.key }
-            .map { (day, list) ->
-                DayEventsGroup(
-                    day = day,
-                    title = dayLabel(day),
-                    countLabel = "${list.size} 段对话",
-                    events = list.asReversed(),
+        // 1b. 将连续无人声的环境音切片（≥15 分钟）凝聚为轻量「环境留白节点」
+        val quietRecsAsc = recs.asReversed().filter { r ->
+            r.name !in transcribedNames && (r.name in marks.silent || r.name in marks.farSkipped)
+        }
+        val ambientSpansByDay = HashMap<LocalDate, MutableList<AmbientSpanUi>>()
+        var qGroup = ArrayList<Recording>()
+        fun flushQuietGroup() {
+            if (qGroup.isEmpty()) return
+            val totalDur = qGroup.sumOf { it.durationSec }
+            val start = qGroup.first().start
+            val end = qGroup.last().end
+            if (totalDur >= 15 * 60) {
+                val day = start.toLocalDate()
+                val place = Places.at(this, start)
+                val tags = aggregateSceneTags(
+                    qGroup.map { SceneAndMood.getSceneTags(this, it.name) }.filter { it.isNotEmpty() },
                 )
+                val cleanScene = tags.map { it.label }.take(2).joinToString("与").ifEmpty { "安静留白" }
+                val durText = fmtMinutes((totalDur / 60.0).roundToInt().coerceAtLeast(15))
+                val summary = buildString {
+                    place?.let { append(it.label).append(" · ") }
+                    append(cleanScene).append(" (").append(durText).append(")")
+                }
+                val span = AmbientSpanUi(
+                    key = "amb_${qGroup.first().name}",
+                    day = day,
+                    startAt = start,
+                    startHm = start.format(HM),
+                    spanLabel = "${start.format(HM)} – ${end.format(HM)}",
+                    summaryText = summary,
+                    searchBlob = "${place?.label.orEmpty()} $cleanScene".lowercase(),
+                )
+                ambientSpansByDay.getOrPut(day) { ArrayList() }.add(span)
+            }
+            qGroup = ArrayList()
+        }
+        for (r in quietRecsAsc) {
+            val prev = qGroup.lastOrNull()
+            if (prev != null && (r.start.toLocalDate() != prev.start.toLocalDate() || Duration.between(prev.end, r.start).seconds > 600)) {
+                flushQuietGroup()
+            }
+            qGroup.add(r)
+        }
+        flushQuietGroup()
+
+        val eventsByDay = allEvents.groupBy { it.day }
+        val allDays = (eventsByDay.keys + ambientSpansByDay.keys).distinct().sortedDescending()
+        val farSkippedByDay = recs.filter { it.name in marks.farSkipped }.groupingBy { it.start.toLocalDate() }.eachCount()
+
+        val dayEvents = allDays.mapNotNull { day ->
+            val evAsc = eventsByDay[day].orEmpty()
+            val ambAsc = ambientSpansByDay[day].orEmpty()
+            if (evAsc.isEmpty() && ambAsc.isEmpty()) return@mapNotNull null
+
+            val nodesDesc = buildList<StreamNodeUi> {
+                evAsc.forEach { add(StreamNodeUi.Conversation(it)) }
+                ambAsc.forEach { add(StreamNodeUi.Ambient(it)) }
+            }.sortedByDescending { it.sortTime }
+
+            val activeTalkSec = evAsc.sumOf { ev ->
+                ev.paras.filter { !it.isBackgroundNoise }.sumOf { it.durationSec }
+            }
+            val talkMin = if (activeTalkSec <= 0) 0 else (activeTalkSec / 60.0).roundToInt().coerceAtLeast(1)
+            val dayPeople = evAsc.flatMap { it.peopleList }.distinct().size
+            val mutedCnt = evAsc.sumOf { it.bgParaCount } + (farSkippedByDay[day] ?: 0)
+            val posCnt = evAsc.count { it.isPositive }
+            val tenseCnt = evAsc.count { it.isTense }
+            val (vibe, vibePos) = when {
+                posCnt > tenseCnt && posCnt > 0 -> "松弛愉悦" to true
+                tenseCnt > posCnt -> "紧凑专注" to false
+                else -> "平和日常" to false
             }
 
-        // 2. 构建录音列表卡片模型
+            DayEventsGroup(
+                day = day,
+                title = dayLabel(day),
+                countLabel = if (evAsc.isNotEmpty()) "${evAsc.size} 段对话" else "环境记录",
+                digest = DayDigestStats(
+                    talkMinutes = talkMin,
+                    peopleCount = dayPeople,
+                    mutedNoiseCount = mutedCnt,
+                    vibeLabel = vibe,
+                    vibePositive = vibePos,
+                ),
+                events = evAsc.asReversed(),
+                nodes = nodesDesc,
+            )
+        }
+
+        // 2. 构建原始录音归档模型
         val recCards = recs.map { r ->
             val tr = Transcripts.get(this, r.name)
             val place = Places.at(this, r.start)
@@ -598,15 +754,17 @@ class MainActivity : ComponentActivity() {
             }
             val preview = tr?.text?.takeIf { it.isNotBlank() }
             val recSceneTags = SceneAndMood.getSceneTags(this, r.name)
-            val recSceneSummary = recSceneTags.takeIf { it.isNotEmpty() }?.let { formatSceneTags(it) }
+            val recSceneSummary = formatCleanSceneTags(aggregateSceneTags(listOf(recSceneTags)), excludeLaugh = false)
             val recMoodPair = tr?.segments?.takeIf { it.isNotEmpty() }?.let { segs ->
                 computeWeightedMoodFromSegments(segs)
             }
+            val recVocal = tr?.segments?.mapNotNull { it.vocalTag }?.distinct()?.take(1).orEmpty()
+            val recAffect = humanAffectCue(recMoodPair?.first, recMoodPair?.second, recVocal)
             val searchBlob = buildString {
                 append(r.name.lowercase())
                 place?.label?.let { append('\n').append(it.lowercase()) }
                 recSceneTags.forEach { append('\n').append(it.label.lowercase()) }
-                recMoodPair?.let { append('\n').append(moodCnLabel(it.first)) }
+                recAffect?.let { append('\n').append(it.lowercase()) }
                 preview?.let { append('\n').append(it.lowercase()) }
             }
             RecordingCardUi(
@@ -615,8 +773,8 @@ class MainActivity : ComponentActivity() {
                 durationLabel = fmtDuration(r.durationSec),
                 placeLabel = place?.label,
                 sceneSummary = recSceneSummary,
-                mood = recMoodPair?.first,
-                moodScore = recMoodPair?.second,
+                affectCue = recAffect,
+                isPositive = recMoodPair?.first == "positive",
                 transcriptPreview = preview,
                 baseStatus = baseStatus,
                 searchBlob = searchBlob,
@@ -638,15 +796,14 @@ class MainActivity : ComponentActivity() {
             }
 
         // 3. 构建人物档案模型
-        val allSpeakers = roster
         val spkCount = HashMap<String, Int>()
         val spkClip = HashMap<String, Pair<Recording, Segment>>()
         val spkSample = HashMap<String, String>()
-        if (allSpeakers.isNotEmpty()) {
+        if (roster.isNotEmpty()) {
             for (r in recs) {
                 val tr = Transcripts.get(this, r.name) ?: continue
                 for (seg in tr.segments) {
-                    val who = resolveInRoster(seg.speaker, allSpeakers)?.id ?: continue
+                    val who = resolveInRoster(seg.speaker, roster)?.id ?: continue
                     if (seg.text.isBlank()) continue
                     spkCount[who] = (spkCount[who] ?: 0) + 1
                     if ((spkSample[who]?.length ?: 0) < seg.text.length) spkSample[who] = seg.text
@@ -657,15 +814,22 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        val visibleSpeakers = allSpeakers.values
+        val visibleSpeakers = roster.values
             .filter { it.mergedInto == null && ((spkCount[it.id] ?: 0) > 0 || it.name != null) }
-            .sortedWith(compareBy<Speaker>({ it.name == null }, { -(spkCount[it.id] ?: 0) }))
+            .sortedWith(
+                compareBy<Speaker>(
+                    { it.id !in selfIds },
+                    { it.name == null },
+                    { -(spkCount[it.id] ?: 0) },
+                ),
+            )
         val peopleCards = visibleSpeakers.map { p ->
-            val aliases = allSpeakers.values.filter {
-                it.mergedInto != null && resolveInRoster(it.id, allSpeakers)?.id == p.id
+            val aliases = roster.values.filter {
+                it.mergedInto != null && resolveInRoster(it.id, roster)?.id == p.id
             }
             PersonCardUi(
                 speaker = p,
+                isSelf = p.id in selfIds,
                 count = spkCount[p.id] ?: 0,
                 aliases = aliases,
                 quote = spkSample[p.id] ?: p.sample,
@@ -673,7 +837,7 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        // 4. 构建地点模型
+        // 4. 构建足迹地点模型
         val allPlaces = Places.all(this)
         val placeStats = Places.stats(this)
         val placeCards = allPlaces.filter { it.mergedInto == null }.map { p ->
@@ -681,12 +845,34 @@ class MainActivity : ComponentActivity() {
             val aliases = allPlaces.filter { it.mergedInto == p.id }
             val line = buildString {
                 if (st != null) {
-                    append("停留 ${st.days} 天 · 约 ${fmtMinutes(st.minutes)}")
+                    append("驻留 ${st.days} 天 · 约 ${fmtMinutes(st.minutes)}")
                     st.last?.let { append(" · 最近 ${it.format(MDHM)}") }
                 }
                 if (aliases.isNotEmpty()) append(" · 已合并 ${aliases.size} 处")
             }
             PlaceCardUi(place = p, statsLine = line, aliases = aliases)
+        }
+
+        // 5. 构建主客气泡流的顶部一键快筛胶囊
+        val quickLenses = buildList {
+            add(FeedFilterLens("all", "全部"))
+            if (allEvents.any { ev -> ev.paras.any { it.isSelf && !it.isBackgroundNoise } }) {
+                add(FeedFilterLens("self", "只看我说"))
+            }
+            if (allEvents.any { it.isPositive }) {
+                add(FeedFilterLens("joy", "愉悦时刻"))
+            }
+            peopleCards
+                .filter { !it.isSelf && it.speaker.name != null && it.count > 0 }
+                .take(4)
+                .forEach { pc ->
+                    add(FeedFilterLens("spk:${pc.speaker.id}", "@${pc.speaker.name}"))
+                }
+            placeCards
+                .take(2)
+                .forEach { pl ->
+                    add(FeedFilterLens("plc:${pl.place.id}", pl.place.label))
+                }
         }
 
         return ArchiveSnapshot(
@@ -696,8 +882,9 @@ class MainActivity : ComponentActivity() {
             dayEvents = dayEvents,
             dayRecordings = dayRecordings,
             people = peopleCards,
-            unnamedPeopleCount = visibleSpeakers.count { it.name == null },
+            unnamedPeopleCount = visibleSpeakers.count { it.name == null && it.id !in selfIds },
             places = placeCards,
+            quickLenses = quickLenses,
         )
     }
 
@@ -708,7 +895,6 @@ class MainActivity : ComponentActivity() {
         var archive by remember { mutableStateOf(ArchiveSnapshot()) }
         var whitelisted by remember { mutableStateOf(isBatteryWhitelisted()) }
 
-        // 监听 config SharedPreferences 变更，任何外部/页面配置写入立即同步刷新 UI
         DisposableEffect(Unit) {
             val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
             val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -719,12 +905,10 @@ class MainActivity : ComponentActivity() {
             onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
         }
 
-        // 仅订阅 textVersion，避免 liveLevel / 秒表高频刷新根组件
         val textVersion by remember {
             AppState.status.map { it.textVersion }.distinctUntilChanged()
         }.collectAsStateWithLifecycle(initialValue = AppState.status.value.textVersion)
 
-        // 按需增量刷新归档快照：签名未变时绝不重建对象、绝不触发列表重组
         LaunchedEffect(textVersion, configVersion, refreshToken) {
             val next = withContext(Dispatchers.IO) {
                 val sig = computeArchiveSignature(textVersion, configVersion, refreshToken)
@@ -751,7 +935,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 仅在播放器真正处于回放态时才以 100ms 驱动进度条，不播放时零协程唤醒
         val isPlaying = player.current != null
         LaunchedEffect(isPlaying) {
             if (!isPlaying) return@LaunchedEffect
@@ -797,7 +980,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val stateHolder = rememberSaveableStateHolder()
-        val pager = rememberPagerState { 4 }
+        val pager = rememberPagerState { 3 }
         var searchOpen by rememberSaveable { mutableStateOf(false) }
         var searchQuery by rememberSaveable { mutableStateOf("") }
 
@@ -808,7 +991,7 @@ class MainActivity : ComponentActivity() {
         AnimatedContent(
             targetState = destination,
             transitionSpec = {
-                if (targetState == RootDestination.SETTINGS) {
+                if (targetState != RootDestination.MAIN) {
                     (slideInHorizontally(tween(220)) { it / 5 } + fadeIn(tween(180))) togetherWith
                         fadeOut(tween(120))
                 } else {
@@ -832,13 +1015,22 @@ class MainActivity : ComponentActivity() {
                         },
                         onSearchQueryChange = { searchQuery = it },
                     )
+                    RootDestination.RECORDINGS -> RawRecordingsScreen(
+                        dayRecordings = archive.dayRecordings,
+                        mode = remember(configVersion) { Config.mode(this@MainActivity) },
+                        asrConfigured = remember(configVersion) { AsrConfig.load(this@MainActivity) != null },
+                        player = player,
+                        onBack = { destination = RootDestination.MAIN },
+                    )
                     RootDestination.SETTINGS -> SettingsScreen(
                         linkState = linkAndDevice.first,
                         deviceName = linkAndDevice.second,
                         whitelisted = whitelisted,
                         hasLocation = hasLocation,
                         unuploadedCount = archive.unuploadedCount,
+                        recordingCount = archive.recs.size,
                         onBack = { destination = RootDestination.MAIN },
+                        onOpenRawRecordings = { destination = RootDestination.RECORDINGS },
                         onConfigChanged = {
                             configVersion++
                             refreshToken++
@@ -865,6 +1057,7 @@ class MainActivity : ComponentActivity() {
         onSearchQueryChange: (String) -> Unit,
     ) {
         val mode = remember(configVersion) { Config.mode(this) }
+        val feedStyle = remember(configVersion) { Config.feedStyle(this) }
         val asrConfig = remember(configVersion) { AsrConfig.load(this) }
         val cloudConfig = remember(configVersion) { Config.load(this) }
         val needsConfig = if (mode == WorkMode.DIRECT_ASR) asrConfig == null else cloudConfig == null
@@ -874,143 +1067,111 @@ class MainActivity : ComponentActivity() {
         val haptic = LocalHapticFeedback.current
         var showStatusPanel by remember { mutableStateOf(false) }
 
-        val tabs = remember { listOf("文字", "录音", "人物", "地点") }
+        val feedTabLabel = if (feedStyle == FeedStyle.DIALOGUE) "对话流" else "今日脉络"
+        val tabs = remember(feedTabLabel) { listOf(feedTabLabel, "人物", "足迹") }
+        val pageTitle = tabs.getOrElse(pager.currentPage) { feedTabLabel }
+        val canvasColor = if (pager.currentPage == 0 && feedStyle == FeedStyle.EDITORIAL) {
+            DeckTheme.colors.paperCanvas
+        } else {
+            MaterialTheme.colorScheme.background
+        }
 
-        Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(canvasColor)) {
             Scaffold(
-                containerColor = MaterialTheme.colorScheme.background,
-                snackbarHost = { SnackbarHost(snackbarHostState) },
+                containerColor = Color.Transparent,
+                snackbarHost = {
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier.padding(bottom = 84.dp),
+                    )
+                },
                 topBar = {
-                    TopHardwareBar(
+                    AppleStreamHeader(
+                        pageTitle = pageTitle,
                         mode = mode,
                         needsConfig = needsConfig,
                         cloudConfigured = cloudConfig != null,
-                        searchOpen = searchOpen,
                         statusOpen = showStatusPanel,
+                        onStartRecording = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (needsConfig) destination = RootDestination.SETTINGS else requestStart()
+                        },
                         onToggleStatusPanel = {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                             showStatusPanel = !showStatusPanel
                         },
-                        onToggleSearch = { onSearchOpenChange(!searchOpen) },
                         onOpenSettings = { destination = RootDestination.SETTINGS },
                     )
                 },
-                bottomBar = { if (player.current != null) TapePlayerDeck(player) },
             ) { pad ->
-                Column(Modifier.padding(pad).fillMaxSize()) {
-                    RecorderDeckStrip(
-                        mode = mode,
-                        needsConfig = needsConfig,
-                        providerLabel = asrConfig?.provider?.shortLabel,
-                        onStart = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            requestStart()
-                        },
-                        onStop = {
-                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                            stopRecorder()
-                        },
-                        onRepair = { requestStart(repair = true) },
-                        onOpenSettings = { destination = RootDestination.SETTINGS },
-                    )
-
-                    AnimatedVisibility(
-                        visible = searchOpen,
-                        enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(150)),
-                        exit = shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut(tween(120)),
-                    ) {
-                        OutlinedTextField(
-                            value = searchQuery,
-                            onValueChange = onSearchQueryChange,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                            singleLine = true,
-                            shape = RoundedCornerShape(10.dp),
-                            placeholder = { Text("搜索对话文字、人物或地点…") },
-                            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
-                            trailingIcon = {
-                                if (searchQuery.isNotEmpty()) {
-                                    IconButton(onClick = { onSearchQueryChange("") }) {
-                                        Icon(Icons.Rounded.Close, contentDescription = "清空搜索")
-                                    }
-                                }
-                            },
-                        )
-                    }
-
-                    PrimaryTabRow(
-                        selectedTabIndex = pager.currentPage,
-                        containerColor = MaterialTheme.colorScheme.background,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                        divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) },
-                    ) {
-                        tabs.forEachIndexed { i, title ->
-                            Tab(
-                                selected = pager.currentPage == i,
-                                onClick = {
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    scope.launch { pager.animateScrollToPage(i) }
-                                },
-                                text = {
-                                    Text(
-                                        title,
-                                        fontWeight = if (pager.currentPage == i) FontWeight.SemiBold else FontWeight.Normal,
-                                    )
-                                },
-                                unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-
+                Box(Modifier.padding(pad).fillMaxSize()) {
                     HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1) { page ->
                         when (page) {
-                            0 -> EventsPageView(
-                                dayEvents = archive.dayEvents,
-                                mode = mode,
-                                unconfigured = needsConfig,
-                                query = searchQuery,
-                                playingName = player.current?.name,
-                                playPosSec = if (player.current != null) player.positionMs / 1000.0 else -1.0,
-                                onSeekLine = { rec, sec ->
-                                    if (player.current?.name != rec.name) player.open(rec)
-                                    player.seekTo((sec * 1000).toInt())
-                                },
-                                onEditPlace = { editingPlace = it },
-                                onEditSpeaker = { spkId -> editing = Speakers.resolve(this@MainActivity, spkId) },
-                                onCopyEvent = { text ->
-                                    clipboard.setText(AnnotatedString(text))
-                                    scope.launch {
-                                        snackbarHostState.currentSnackbarData?.dismiss()
-                                        snackbarHostState.showSnackbar("已复制对话文字", duration = SnackbarDuration.Short)
-                                    }
-                                },
-                                onOpenSettings = { destination = RootDestination.SETTINGS },
-                            )
-                            1 -> RecordingsPageView(
-                                dayRecordings = archive.dayRecordings,
-                                mode = mode,
-                                asrConfigured = asrConfig != null,
-                                query = searchQuery,
-                                selectedFile = player.current?.name,
-                                isPlaying = player.playing,
-                                playProgress = if (player.current != null && player.durationMs > 0) {
-                                    (player.positionMs.toFloat() / player.durationMs).coerceIn(0f, 1f)
-                                } else 0f,
-                                onToggleOrOpen = { rec ->
-                                    if (player.current?.name == rec.name) player.toggle() else player.open(rec)
-                                },
-                                onSelectCard = { rec ->
-                                    if (player.current?.name != rec.name) player.open(rec)
-                                },
-                            )
-                            2 -> PeoplePageView(
+                            0 -> when (feedStyle) {
+                                FeedStyle.DIALOGUE -> DialogueStreamView(
+                                    dayEvents = archive.dayEvents,
+                                    lenses = archive.quickLenses,
+                                    mode = mode,
+                                    unconfigured = needsConfig,
+                                    query = searchQuery,
+                                    playingName = player.current?.name,
+                                    isPlaying = player.playing,
+                                    playPosSec = if (player.current != null) player.positionMs / 1000.0 else -1.0,
+                                    onTapTurn = { rec, sec ->
+                                        if (player.current?.name == rec.name && abs(player.positionMs / 1000.0 - sec) < 4.0) {
+                                            player.toggle()
+                                        } else {
+                                            if (player.current?.name != rec.name) player.open(rec)
+                                            player.seekTo((sec * 1000).toInt())
+                                        }
+                                    },
+                                    onEditPlace = { editingPlace = it },
+                                    onEditSpeaker = { spkId -> editing = Speakers.resolve(this@MainActivity, spkId) },
+                                    onCopyEvent = { text ->
+                                        clipboard.setText(AnnotatedString(text))
+                                        scope.launch {
+                                            snackbarHostState.currentSnackbarData?.dismiss()
+                                            snackbarHostState.showSnackbar("已复制对话文字", duration = SnackbarDuration.Short)
+                                        }
+                                    },
+                                    onOpenSettings = { destination = RootDestination.SETTINGS },
+                                )
+                                FeedStyle.EDITORIAL -> EditorialStreamView(
+                                    dayEvents = archive.dayEvents,
+                                    mode = mode,
+                                    unconfigured = needsConfig,
+                                    query = searchQuery,
+                                    playingName = player.current?.name,
+                                    playPosSec = if (player.current != null) player.positionMs / 1000.0 else -1.0,
+                                    onSeekLine = { rec, sec ->
+                                        if (player.current?.name != rec.name) player.open(rec)
+                                        player.seekTo((sec * 1000).toInt())
+                                    },
+                                    onEditPlace = { editingPlace = it },
+                                    onEditSpeaker = { spkId -> editing = Speakers.resolve(this@MainActivity, spkId) },
+                                    onCopyEvent = { text ->
+                                        clipboard.setText(AnnotatedString(text))
+                                        scope.launch {
+                                            snackbarHostState.currentSnackbarData?.dismiss()
+                                            snackbarHostState.showSnackbar("已复制对话文字", duration = SnackbarDuration.Short)
+                                        }
+                                    },
+                                    onOpenSettings = { destination = RootDestination.SETTINGS },
+                                )
+                            }
+                            1 -> PeoplePageView(
                                 people = archive.people,
                                 unnamedCount = archive.unnamedPeopleCount,
                                 onPlayClip = { c ->
                                     player.playRange(c.first, (c.second.start * 1000).toInt(), (c.second.end * 1000).toInt() + 300)
                                 },
                                 onRename = { editing = it },
+                                onMarkSelf = { spk ->
+                                    scope.launch(Dispatchers.IO) {
+                                        Speakers.edit(this@MainActivity, spk.id, name = "我")
+                                        refreshToken++
+                                    }
+                                },
                                 onMerge = { merging = it },
                                 onUnmerge = { aliasId ->
                                     scope.launch(Dispatchers.IO) {
@@ -1032,16 +1193,34 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+
+                    // 底部 iOS 18 风格悬浮毛玻璃胶囊导航 + 搜索栏 + 迷你回放条
+                    FloatingGlassDock(
+                        tabs = tabs,
+                        selectedTab = pager.currentPage,
+                        searchOpen = searchOpen,
+                        searchQuery = searchQuery,
+                        player = player,
+                        showMiniPlayer = player.current != null && (pager.currentPage != 0 || feedStyle == FeedStyle.EDITORIAL),
+                        onSelectTab = { idx ->
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            scope.launch { pager.animateScrollToPage(idx) }
+                        },
+                        onToggleSearch = { onSearchOpenChange(!searchOpen) },
+                        onSearchQueryChange = onSearchQueryChange,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
                 }
             }
 
-            // 顶栏锚定弹簧设备状态浮层：紧贴顶栏下方弹出，绝不底部裁切、绝不需下滑找按钮！
+            // 顶栏锚定弹簧设备状态浮层（零底部裁切）
             DeviceStatusPopover(
                 visible = showStatusPanel,
                 mode = mode,
                 asrProviderLabel = asrConfig?.provider?.shortLabel,
                 whitelisted = whitelisted,
                 unuploaded = archive.unuploadedCount,
+                recordingCount = archive.recs.size,
                 onDismiss = { showStatusPanel = false },
                 onStart = {
                     showStatusPanel = false
@@ -1050,6 +1229,10 @@ class MainActivity : ComponentActivity() {
                 onStop = {
                     showStatusPanel = false
                     stopRecorder()
+                },
+                onOpenRawRecordings = {
+                    showStatusPanel = false
+                    destination = RootDestination.RECORDINGS
                 },
                 onOpenSettings = {
                     showStatusPanel = false
@@ -1071,6 +1254,7 @@ class MainActivity : ComponentActivity() {
             val clip = people.firstOrNull { it.speaker.id == p.id }?.clip
             AlertDialog(
                 onDismissRequest = { editing = null },
+                shape = MaterialTheme.shapes.large,
                 title = { Text("给 ${p.name ?: p.defaultName} 起名字") },
                 text = {
                     Column {
@@ -1078,18 +1262,24 @@ class MainActivity : ComponentActivity() {
                             value = text,
                             onValueChange = { text = it },
                             singleLine = true,
-                            placeholder = { Text("例如：我、老王、张工") },
+                            shape = MaterialTheme.shapes.small,
+                            placeholder = { Text("例如：我、张工、林姐") },
                         )
-                        Spacer(Modifier.height(8.dp))
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Spacer(Modifier.height(10.dp))
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            ActionChip(Icons.Rounded.Person, "设为「我」") {
+                                text = "我"
+                            }
                             clip?.let { c ->
                                 ActionChip(Icons.Rounded.PlayArrow, "试听原声") {
                                     player.playRange(c.first, (c.second.start * 1000).toInt(), (c.second.end * 1000).toInt() + 300)
                                 }
                             }
-                            ActionChip(Icons.Rounded.MergeType, "合并到已有名字") {
-                                merging = p
-                                editing = null
+                            if (people.size > 1) {
+                                ActionChip(Icons.AutoMirrored.Rounded.MergeType, "合并到已有名字") {
+                                    merging = p
+                                    editing = null
+                                }
                             }
                         }
                     }
@@ -1110,6 +1300,7 @@ class MainActivity : ComponentActivity() {
             val others = people.filter { it.speaker.id != p.id }
             AlertDialog(
                 onDismissRequest = { merging = null },
+                shape = MaterialTheme.shapes.large,
                 title = { Text("将 ${p.name ?: p.defaultName} 合并到谁？") },
                 text = {
                     LazyColumn(Modifier.heightIn(max = 400.dp)) {
@@ -1175,12 +1366,14 @@ class MainActivity : ComponentActivity() {
             var text by remember(p.id) { mutableStateOf(p.name ?: "") }
             AlertDialog(
                 onDismissRequest = { editingPlace = null },
+                shape = MaterialTheme.shapes.large,
                 title = { Text("给「${p.label}」起常用名") },
                 text = {
                     OutlinedTextField(
                         value = text,
                         onValueChange = { text = it },
                         singleLine = true,
+                        shape = MaterialTheme.shapes.small,
                         placeholder = { Text(p.auto ?: "例如：家、公司、咖啡馆") },
                     )
                 },
@@ -1198,6 +1391,7 @@ class MainActivity : ComponentActivity() {
             val others = places.map { it.place }.filter { it.id != p.id }
             AlertDialog(
                 onDismissRequest = { mergingPlace = null },
+                shape = MaterialTheme.shapes.large,
                 title = { Text("将「${p.label}」合并到哪一处？") },
                 text = {
                     LazyColumn(Modifier.heightIn(max = 380.dp)) {
@@ -1311,26 +1505,26 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        fun fmtMinutes(m: Int) = if (m >= 60) "${m / 60} 小时${if (m % 60 > 0) " ${m % 60} 分" else ""}" else "$m 分钟"
+        fun fmtMinutes(m: Int) = if (m >= 60) "${m / 60}h${if (m % 60 > 0) " ${m % 60}m" else ""}" else "${m}m"
 
         fun fmtMs(ms: Int): String {
             val s = (ms / 1000).coerceAtLeast(0)
-            return "%02d:%02d".format(s / 60, s % 60)
+            return "%d:%02d".format(s / 60, s % 60)
         }
     }
 }
 
-// ───────────────────── 顶层可跳过（Skippable）UI 组件：完全隔离状态读取 ─────────────────────
+// ───────────────────── 极简苹果风顶栏（取代占空间的磁带走带横条，状态切换 0 跳动） ─────────────────────
 
 @Composable
-private fun TopHardwareBar(
+private fun AppleStreamHeader(
+    pageTitle: String,
     mode: WorkMode,
     needsConfig: Boolean,
     cloudConfigured: Boolean,
-    searchOpen: Boolean,
     statusOpen: Boolean,
+    onStartRecording: () -> Unit,
     onToggleStatusPanel: () -> Unit,
-    onToggleSearch: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val slice by remember(mode, needsConfig, cloudConfigured) {
@@ -1363,384 +1557,146 @@ private fun TopHardwareBar(
 
     val deck = DeckTheme.colors
     val colors = MaterialTheme.colorScheme
+    val todayText = remember {
+        val d = LocalDate.now()
+        val w = d.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.CHINA)
+        "${d.format(MainActivity.MD)} · $w"
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 4.dp),
+            .padding(start = 20.dp, end = 12.dp, top = 8.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = "Hark",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.weight(1f))
-
-        // 方角机械硬件状态铭牌（6dp 利落切角，彻底告别圆胶囊）
-        Surface(
-            onClick = onToggleStatusPanel,
-            modifier = Modifier
-                .pressScale()
-                .semantics { contentDescription = "打开设备状态" },
-            shape = RoundedCornerShape(6.dp),
-            color = if (statusOpen) colors.surfaceContainerHigh else colors.surfaceContainerLow,
-            border = BorderStroke(1.dp, if (statusOpen) colors.outline else colors.outlineVariant),
-        ) {
+        Column(Modifier.weight(1f)) {
             Row(
-                modifier = Modifier.padding(start = 9.dp, end = 6.dp, top = 5.dp, bottom = 5.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                val dotColor = when {
-                    slice.link == LinkState.STREAMING -> deck.ledGreen
-                    slice.hasWarning -> deck.ledAmber
-                    else -> colors.outline
-                }
-                StatusDot(color = dotColor, breathing = slice.transcribing)
                 Text(
-                    text = when {
-                        slice.transcribing -> "DT-1 · 转写中"
-                        slice.batteryPct != null -> "DT-1 · ${slice.batteryPct}%"
-                        slice.link == LinkState.STREAMING -> "DT-1 · 已连接"
-                        slice.link == LinkState.STOPPED -> "DT-1"
-                        else -> slice.link.label
-                    },
-                    style = MaterialTheme.typography.labelMedium.merge(TabularMono),
-                    color = colors.onSurface,
+                    text = "Hark",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = colors.onSurfaceVariant,
                 )
-                Icon(
-                    imageVector = if (statusOpen) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
-                    contentDescription = null,
-                    modifier = Modifier.size(15.dp),
-                    tint = colors.onSurfaceVariant,
+                Text(
+                    text = "· $todayText",
+                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.85f),
                 )
             }
+            Text(
+                text = pageTitle,
+                style = MaterialTheme.typography.headlineSmall,
+                color = colors.onSurface,
+                maxLines = 1,
+            )
         }
 
-        // 搜索开关
-        if (searchOpen) {
-            FilledTonalIconButton(
-                onClick = onToggleSearch,
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier.padding(start = 4.dp).size(36.dp).pressScale(),
+        // 待机态：一键「● 开始录音」黑底圆胶囊 + 设备状态入口；走带态：白底呼吸红点「● 记录中 · 84%」圆胶囊
+        if (slice.link == LinkState.STOPPED) {
+            Surface(
+                onClick = onStartRecording,
+                modifier = Modifier.height(34.dp).pressScale(),
+                shape = CircleShape,
+                color = colors.primary,
+                contentColor = colors.onPrimary,
             ) {
-                Icon(Icons.Rounded.Search, contentDescription = "收起搜索", modifier = Modifier.size(20.dp))
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(deck.signalRed))
+                    Text(
+                        text = if (needsConfig) "配置转写" else "开始录音",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            Surface(
+                onClick = onToggleStatusPanel,
+                modifier = Modifier
+                    .size(34.dp)
+                    .pressScale()
+                    .semantics { contentDescription = "打开设备状态" },
+                shape = CircleShape,
+                color = colors.surfaceContainerLowest,
+                border = BorderStroke(1.dp, colors.outlineVariant),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Rounded.BluetoothAudio,
+                        contentDescription = null,
+                        modifier = Modifier.size(17.dp),
+                        tint = if (slice.hasWarning) deck.ledAmber else colors.onSurfaceVariant,
+                    )
+                }
             }
         } else {
-            IconButton(onClick = onToggleSearch, modifier = Modifier.pressScale()) {
-                Icon(Icons.Rounded.Search, contentDescription = "搜索记录", tint = colors.onSurfaceVariant)
+            Surface(
+                onClick = onToggleStatusPanel,
+                modifier = Modifier
+                    .height(34.dp)
+                    .pressScale()
+                    .semantics { contentDescription = "打开设备状态" },
+                shape = CircleShape,
+                color = colors.surfaceContainerLowest,
+                border = BorderStroke(1.dp, if (statusOpen) colors.outline else colors.outlineVariant),
+                shadowElevation = 2.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 13.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val dotColor = when {
+                        slice.link == LinkState.STREAMING -> deck.signalRed
+                        slice.hasWarning -> deck.ledAmber
+                        else -> deck.accentBlue
+                    }
+                    StatusDot(color = dotColor, breathing = slice.link == LinkState.STREAMING || slice.transcribing)
+                    val label = when {
+                        slice.transcribing -> buildString {
+                            append("整理中")
+                            slice.batteryPct?.let { append(" · ").append(it).append('%') }
+                        }
+                        slice.link == LinkState.STREAMING -> buildString {
+                            append("记录中")
+                            slice.batteryPct?.let { append(" · ").append(it).append('%') }
+                        }
+                        else -> slice.link.label
+                    }
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelLarge.merge(TabularMono),
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.onSurface,
+                    )
+                }
             }
         }
 
-        // 独立设置按钮
-        IconButton(onClick = onOpenSettings, modifier = Modifier.pressScale()) {
+        IconButton(
+            onClick = onOpenSettings,
+            modifier = Modifier.padding(start = 2.dp).size(38.dp).pressScale(),
+        ) {
             BadgedBox(
                 badge = {
                     if (needsConfig) Badge(containerColor = deck.signalRed)
                 },
             ) {
-                Icon(Icons.Rounded.Settings, contentDescription = "设置", tint = colors.onSurface)
+                Icon(Icons.Rounded.Settings, contentDescription = "设置", tint = colors.onSurfaceVariant)
             }
         }
     }
 }
 
-@Composable
-private fun RecorderDeckStrip(
-    mode: WorkMode,
-    needsConfig: Boolean,
-    providerLabel: String?,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-    onRepair: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    val slice by remember {
-        AppState.status.map { s ->
-            val streaming = s.link == LinkState.STREAMING
-            val written = streaming && s.lastWriteNanos != 0L &&
-                (System.nanoTime() - s.lastWriteNanos < 2_500_000_000L)
-            DeckStatusSlice(
-                link = s.link,
-                message = s.message,
-                chunkSec = s.currentChunkSeconds.toInt(),
-                written = written,
-                liveUnavailable = s.liveUnavailable,
-                fallbackLevel = s.liveLevel,
-            )
-        }.distinctUntilChanged()
-    }.collectAsStateWithLifecycle(
-        initialValue = DeckStatusSlice(LinkState.STOPPED, null, 0, false, false, null),
-    )
-
-    val deck = DeckTheme.colors
-    val colors = MaterialTheme.colorScheme
-
-    val isStreaming = slice.link == LinkState.STREAMING
-    val cardBg by animateColorAsState(
-        targetValue = if (isStreaming) deck.tapeWell else colors.surfaceContainerLowest,
-        animationSpec = tween(200),
-        label = "deckBg",
-    )
-    val cardBorder by animateColorAsState(
-        targetValue = if (isStreaming) deck.signalRed.copy(alpha = 0.35f) else colors.outlineVariant,
-        animationSpec = tween(200),
-        label = "deckBorder",
-    )
-
-    OutlinedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.outlinedCardColors(containerColor = cardBg),
-        border = BorderStroke(1.dp, cardBorder),
-    ) {
-        val stateKey = when (slice.link) {
-            LinkState.STOPPED -> 0
-            LinkState.STREAMING -> 1
-            else -> 2
-        }
-        AnimatedContent(
-            targetState = stateKey,
-            transitionSpec = { fadeIn(tween(160)) togetherWith fadeOut(tween(110)) },
-            label = "deckState",
-        ) { target ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(66.dp)
-                    .padding(horizontal = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                when (target) {
-                    0 -> {
-                        TapeReelsGraphic(spinning = false)
-                        Spacer(Modifier.width(12.dp))
-                        Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(6.dp))
-                                .clickable(onClick = onOpenSettings),
-                        ) {
-                            val title = when {
-                                needsConfig -> "待配置${mode.label}"
-                                mode == WorkMode.DIRECT_ASR -> "手机直连 · ${providerLabel ?: "直连服务"}"
-                                else -> "云端信箱 · 端到端加密"
-                            }
-                            Text(
-                                text = title,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = if (needsConfig) deck.ledAmber else colors.onSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(
-                                text = if (needsConfig) "点此填写凭据后开始录音" else "点此切换转写路径",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(10.dp))
-                        // 8dp 利落方角机械录音键（告别圆胶囊）
-                        Button(
-                            onClick = onStart,
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 9.dp),
-                            modifier = Modifier.pressScale(),
-                        ) {
-                            Box(Modifier.size(6.dp).clip(RoundedCornerShape(2.dp)).background(deck.signalRed))
-                            Spacer(Modifier.width(7.dp))
-                            Text("开始录音")
-                        }
-                    }
-
-                    1 -> {
-                        // 开阔一体化录音主控台（去除嵌套内胶囊，整块面板直接承载 REC 方标 + 走表 + 120Hz 频谱 + 方角停止键）
-                        Column(horizontalAlignment = Alignment.Start) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    Modifier
-                                        .clip(RoundedCornerShape(3.dp))
-                                        .background(if (slice.written) deck.signalRed else deck.ledAmber)
-                                        .padding(horizontal = 4.dp, vertical = 1.dp),
-                                ) {
-                                    Text(
-                                        text = "REC",
-                                        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                    )
-                                }
-                            }
-                            Spacer(Modifier.height(2.dp))
-                            Text(
-                                text = MainActivity.fmtMs(slice.chunkSec * 1000),
-                                style = MaterialTheme.typography.titleMedium.merge(TabularMono),
-                                fontWeight = FontWeight.SemiBold,
-                                color = if (slice.written) colors.onSurface else deck.ledAmber,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Box(Modifier.width(1.dp).height(30.dp).background(deck.tapeGroove))
-                        Spacer(Modifier.width(12.dp))
-                        when {
-                            !slice.written -> Text(
-                                text = "等待设备音频流…",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = deck.ledAmber,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                            )
-                            slice.liveUnavailable -> Text(
-                                text = "音频流写入中",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                                modifier = Modifier.weight(1f),
-                            )
-                            else -> LiveSpectrumBar(
-                                fallbackLevel = slice.fallbackLevel,
-                                color = colors.onSurface,
-                                peakColor = deck.signalRed,
-                                modifier = Modifier.weight(1f),
-                            )
-                        }
-
-                        Spacer(Modifier.width(12.dp))
-                        // 8dp 利落方角机械停止键
-                        Surface(
-                            onClick = onStop,
-                            shape = RoundedCornerShape(8.dp),
-                            color = colors.surfaceContainerLowest,
-                            border = BorderStroke(1.dp, deck.signalRed.copy(alpha = 0.45f)),
-                            modifier = Modifier.height(38.dp).pressScale(),
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 11.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            ) {
-                                Box(
-                                    Modifier
-                                        .size(9.dp)
-                                        .clip(RoundedCornerShape(2.dp))
-                                        .background(deck.signalRed),
-                                )
-                                Text(
-                                    text = "停止",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = deck.signalRed,
-                                )
-                            }
-                        }
-                    }
-
-                    else -> {
-                        val problem = slice.link == LinkState.PAIRING_REQUIRED
-                        StatusDot(color = if (problem) colors.error else deck.ledAmber, breathing = !problem)
-                        Spacer(Modifier.width(12.dp))
-                        Text(
-                            text = slice.message ?: slice.link.label,
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (problem) colors.error else colors.onSurface,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        if (problem) {
-                            FilledTonalButton(
-                                onClick = onRepair,
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.pressScale(),
-                            ) { Text("重新配对") }
-                        } else {
-                            OutlinedButton(
-                                onClick = onStop,
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.pressScale(),
-                            ) { Text("停止") }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * 120Hz 亚像素连续滑动实时声压频谱：
- * - 后台音频解码线程按 20ms 帧实时累积峰值柱并维护环形历史（从设置页返回或解锁亮屏立刻衔接）；
- * - UI 仅在 Canvas Draw 阶段按 120Hz 计算亚像素偏移（subShift），0 次 Compose 重组、0 分配。
- */
-@Composable
-private fun LiveSpectrumBar(
-    fallbackLevel: Float?,
-    color: Color,
-    peakColor: Color,
-    modifier: Modifier = Modifier,
-) {
-    val snapshotBuf = remember { FloatArray(72) }
-    val smoothHeadBox = remember { FloatArray(1) }
-    val fb by rememberUpdatedState(fallbackLevel)
-    val frameClock = rememberInfiniteTransition(label = "spectrum").animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(1000, easing = LinearEasing), RepeatMode.Restart),
-        label = "spectrumClock",
-    )
-
-    Canvas(modifier.height(26.dp)) {
-        // 仅在 Draw 阶段读取动画帧，触发 GPU RenderNode 120Hz 重绘，0 Snapshot 写入、0 重组
-        @Suppress("UNUSED_VARIABLE")
-        val tick = frameClock.value
-        val now = System.nanoTime()
-        val liveNow = LiveAudioMonitor.currentLevel(now, fb).coerceIn(0f, 1f)
-        val prev = smoothHeadBox[0]
-        val smoothHead = prev + (liveNow - prev) * (if (liveNow > prev) 0.5f else 0.2f)
-        smoothHeadBox[0] = smoothHead
-        val (count, frac) = LiveAudioMonitor.readSpectrum(now, snapshotBuf, fb)
-
-        val bar = 2.5.dp.toPx()
-        val step = bar + 2.2.dp.toPx()
-        val maxBars = (size.width / step).toInt() + 2
-        val subShift = frac * step
-
-        for (i in 0 until maxBars) {
-            val x = size.width - bar - i * step + step - subShift
-            if (x + bar < 0f || x > size.width) continue
-            val v = when {
-                i == 0 -> smoothHead
-                i - 1 < count -> snapshotBuf[i - 1]
-                else -> 0f
-            }
-            if (v < 0.03f) {
-                val idleH = 2.dp.toPx()
-                drawRoundRect(
-                    color = color.copy(alpha = 0.15f),
-                    topLeft = Offset(x, (size.height - idleH) / 2f),
-                    size = Size(bar, idleH),
-                    cornerRadius = CornerRadius(bar / 2f),
-                )
-            } else {
-                val h = (v * size.height).coerceAtLeast(3.dp.toPx())
-                val c = if (v > 0.75f) peakColor else color
-                val fade = (1f - 0.62f * (i.toFloat() / maxBars.coerceAtLeast(1))).coerceIn(0.28f, 1f)
-                drawRoundRect(
-                    color = c.copy(alpha = fade),
-                    topLeft = Offset(x, (size.height - h) / 2f),
-                    size = Size(bar, h),
-                    cornerRadius = CornerRadius(bar / 2f),
-                )
-            }
-        }
-    }
-}
-
-// ───────────────────── 顶栏锚定弹簧设备状态浮层（零裁切、免滑动、120Hz 原生窗口内动画） ─────────────────────
+// ───────────────────── 顶栏锚定设备状态浮层（Apple AirPods 风格紧凑卡片） ─────────────────────
 
 @Composable
 private fun DeviceStatusPopover(
@@ -1749,15 +1705,20 @@ private fun DeviceStatusPopover(
     asrProviderLabel: String?,
     whitelisted: Boolean,
     unuploaded: Int,
+    recordingCount: Int,
     onDismiss: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
+    onOpenRawRecordings: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestWhitelist: () -> Unit,
 ) {
-    if (visible) {
-        BackHandler(onBack = onDismiss)
-    }
+    val s by AppState.status.collectAsStateWithLifecycle()
+    val deck = DeckTheme.colors
+    val colors = MaterialTheme.colorScheme
+    var showTech by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = visible, onBack = onDismiss)
 
     AnimatedVisibility(
         visible = visible,
@@ -1765,9 +1726,9 @@ private fun DeviceStatusPopover(
         exit = fadeOut(tween(120)),
     ) {
         Box(
-            modifier = Modifier
+            Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.32f))
+                .background(Color.Black.copy(alpha = 0.22f))
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
@@ -1778,27 +1739,22 @@ private fun DeviceStatusPopover(
 
     AnimatedVisibility(
         visible = visible,
-        enter = scaleIn(
-            initialScale = 0.92f,
-            transformOrigin = TransformOrigin(0.82f, 0f),
-            animationSpec = spring(dampingRatio = 0.78f, stiffness = 540f),
-        ) + fadeIn(tween(140)),
-        exit = scaleOut(
-            targetScale = 0.94f,
-            transformOrigin = TransformOrigin(0.82f, 0f),
+        enter = fadeIn(tween(160)) + scaleIn(
+            initialScale = 0.95f,
+            transformOrigin = TransformOrigin(0.85f, 0f),
+            animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow),
+        ),
+        exit = fadeOut(tween(120)) + scaleOut(
+            targetScale = 0.96f,
+            transformOrigin = TransformOrigin(0.85f, 0f),
             animationSpec = tween(120),
-        ) + fadeOut(tween(110)),
+        ),
     ) {
-        val s by AppState.status.collectAsStateWithLifecycle()
-        val colors = MaterialTheme.colorScheme
-        var showTech by remember { mutableStateOf(false) }
-
         Box(
-            modifier = Modifier
+            Modifier
                 .fillMaxWidth()
                 .statusBarsPadding()
-                .navigationBarsPadding()
-                .padding(top = 54.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
+                .padding(top = 64.dp, start = 16.dp, end = 16.dp),
         ) {
             Surface(
                 modifier = Modifier
@@ -1808,53 +1764,42 @@ private fun DeviceStatusPopover(
                         indication = null,
                         onClick = {},
                     ),
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.large,
                 color = colors.surfaceContainerLowest,
-                shadowElevation = 12.dp,
                 border = BorderStroke(1.dp, colors.outlineVariant),
+                shadowElevation = 16.dp,
             ) {
                 Column(
-                    modifier = Modifier
-                        .verticalScroll(rememberScrollState())
-                        .padding(18.dp),
+                    Modifier.padding(18.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("设备状态", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                text = "${s.deviceName ?: "Hark DT-1"} · ${mode.label}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
-                        FilledTonalButton(
-                            onClick = onOpenSettings,
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.pressScale(),
-                        ) {
-                            Icon(Icons.Rounded.Settings, contentDescription = null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(5.dp))
-                            Text("设置")
-                        }
-                    }
-
-                    s.message?.let {
-                        Text(it, color = colors.error, style = MaterialTheme.typography.bodySmall)
-                    }
-
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        TelemetryMetricTile(
-                            label = "蓝牙连接",
-                            value = s.link.label,
-                            sub = if (s.link == LinkState.STREAMING) "已录 ${MainActivity.fmtMs((s.currentChunkSeconds * 1000).toInt())}" else "随时可开始",
+                        Text(
+                            text = "设备状态",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f),
                         )
+                        TextButton(
+                            onClick = onOpenSettings,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        ) {
+                            Text("设置", style = MaterialTheme.typography.labelLarge, color = deck.accentBlue)
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TelemetryMetricTile(
+                            label = "连接状态",
+                            value = s.link.label,
+                            sub = s.deviceName ?: "Hark 随身贴",
+                            modifier = Modifier.weight(1f),
+                        )
+                        val pct = s.batteryMv?.let { MainActivity.batteryPct(it) }
                         TelemetryMetricTile(
                             label = "设备电量",
-                            value = s.batteryMv?.let { "${MainActivity.batteryPct(it)}%" } ?: "—",
-                            sub = if (s.batteryMv != null) "蓝牙实时回传" else "连接设备后显示",
+                            value = pct?.let { "$it%" } ?: "连接后读取",
+                            sub = if (pct != null) "低功耗蓝牙采集中" else "待机就绪",
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -1862,15 +1807,16 @@ private fun DeviceStatusPopover(
                     val syncVal: String
                     val syncSub: String
                     if (mode == WorkMode.DIRECT_ASR) {
+                        val running = s.localAsrRunning
+                        val err = s.localAsrError
                         syncVal = when {
-                            asrProviderLabel == null -> "未配置服务商"
-                            s.localAsrRunning != null -> "正在转写…"
-                            s.localAsrError != null -> "转写待重试"
-                            s.pendingUploads > 0 -> "待转写 ${s.pendingUploads} 段"
-                            else -> "已全部转写"
+                            running != null -> "正在整理文字…"
+                            err != null -> "整理遇到问题"
+                            asrProviderLabel != null -> "直连就绪"
+                            else -> "待配置直连服务"
                         }
-                        syncSub = asrProviderLabel?.let { "$it（已启用）" }
-                            ?: (if (unuploaded > 0) "$unuploaded 段待同步" else "点右上设置填写")
+                        syncSub = asrProviderLabel?.let { "$it · 声纹与远近自动判别" }
+                            ?: "点右上设置填写 API Key"
                     } else {
                         val remote = s.remote
                         syncVal = when (remote.mailboxReachable) {
@@ -1884,12 +1830,22 @@ private fun DeviceStatusPopover(
                             else -> workerShortLabel(remote)
                         }
                     }
-                    TelemetryMetricTile(
-                        label = if (mode == WorkMode.DIRECT_ASR) "手机直连转写" else "云端信箱同步",
-                        value = syncVal,
-                        sub = syncSub,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        TelemetryMetricTile(
+                            label = if (mode == WorkMode.DIRECT_ASR) "手机直连转写" else "云端信箱同步",
+                            value = syncVal,
+                            sub = syncSub,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TelemetryMetricTile(
+                            label = "原始录音归档",
+                            value = "$recordingCount 段音频",
+                            sub = if (unuploaded > 0 && mode == WorkMode.CLOUD) "待同步 $unuploaded 段 · 点击查看" else "查看切片与波形 ›",
+                            modifier = Modifier.weight(1f),
+                            onClick = onOpenRawRecordings,
+                        )
+                    }
 
                     if (s.link == LinkState.STREAMING) {
                         val lossPct = if (s.totalPackets > 0) s.lostPackets * 100.0 / (s.totalPackets + s.lostPackets) else 0.0
@@ -1897,15 +1853,14 @@ private fun DeviceStatusPopover(
                         val silentPct = if (s.silentFrames > 0 && all > 0) s.silentFrames * 100.0 / all else 0.0
                         Text(
                             text = if (showTech) {
-                                "链路诊断：码率 %.1f KB/s · 丢包 %.2f%% · 静音省略 %.0f%%".format(s.bytesPerSec / 1000.0, lossPct, silentPct) +
-                                    (s.batteryMv?.let { " · %.2fV".format(it / 1000.0) } ?: "")
+                                "码率 %.1f KB/s · 丢包 %.2f%% · 静音省略 %.0f%%".format(s.bytesPerSec / 1000.0, lossPct, silentPct)
                             } else {
-                                "查看链路诊断参数"
+                                "查看无线链路诊断"
                             },
                             style = MaterialTheme.typography.labelSmall.merge(TabularMono),
                             color = colors.onSurfaceVariant,
                             modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
+                                .clip(RoundedCornerShape(6.dp))
                                 .clickable { showTech = !showTech }
                                 .padding(vertical = 2.dp),
                         )
@@ -1914,18 +1869,18 @@ private fun DeviceStatusPopover(
                     if (!whitelisted) {
                         Surface(
                             onClick = onRequestWhitelist,
-                            shape = RoundedCornerShape(8.dp),
+                            shape = MaterialTheme.shapes.small,
                             color = colors.secondaryContainer,
                             modifier = Modifier.pressScale(),
                         ) {
                             Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Icon(Icons.Rounded.BatteryAlert, contentDescription = null, Modifier.size(16.dp))
                                 Spacer(Modifier.width(8.dp))
                                 Text("建议开启后台不受限运行，防止锁屏断连", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                                Text("去开启", style = MaterialTheme.typography.labelMedium, color = colors.primary)
+                                Text("去开启", style = MaterialTheme.typography.labelMedium, color = deck.accentBlue)
                             }
                         }
                     }
@@ -1933,13 +1888,17 @@ private fun DeviceStatusPopover(
                     if (s.link == LinkState.STOPPED) {
                         Button(
                             onClick = onStart,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = MaterialTheme.shapes.small,
                             modifier = Modifier.fillMaxWidth().pressScale(),
                         ) { Text("开始录音") }
                     } else {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = onStop,
-                            shape = RoundedCornerShape(10.dp),
+                            shape = MaterialTheme.shapes.small,
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = deck.signalRedContainer,
+                                contentColor = deck.signalRed,
+                            ),
                             modifier = Modifier.fillMaxWidth().pressScale(),
                         ) { Text("停止录音") }
                     }
@@ -1955,12 +1914,14 @@ private fun TelemetryMetricTile(
     value: String,
     sub: String,
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
 ) {
     Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(8.dp),
-        color = DeckTheme.colors.tapeWell,
-        border = BorderStroke(1.dp, DeckTheme.colors.tapeGroove),
+        modifier = if (onClick != null) modifier.pressScale() else modifier,
+        onClick = onClick ?: {},
+        enabled = onClick != null,
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainer,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1982,10 +1943,423 @@ private fun TelemetryMetricTile(
     }
 }
 
-// ───────────────────── Tab 1：文字（全量 @Immutable 渲染，滚动满帧 120Hz） ─────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 模式 B：主客气泡流（Dialogue Stream · iMessage / 微信语音直觉）
+// ═══════════════════════════════════════════════════════════════════════════
 
 @Composable
-private fun EventsPageView(
+private fun DialogueStreamView(
+    dayEvents: List<DayEventsGroup>,
+    lenses: List<FeedFilterLens>,
+    mode: WorkMode,
+    unconfigured: Boolean,
+    query: String,
+    playingName: String?,
+    isPlaying: Boolean,
+    playPosSec: Double,
+    onTapTurn: (Recording, Double) -> Unit,
+    onEditPlace: (Place) -> Unit,
+    onEditSpeaker: (String) -> Unit,
+    onCopyEvent: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    var activeLens by rememberSaveable { mutableStateOf("all") }
+    LaunchedEffect(lenses) {
+        if (lenses.none { it.id == activeLens }) activeLens = "all"
+    }
+
+    val q = query.trim().lowercase()
+    val filteredGroups = remember(dayEvents, q, activeLens) {
+        dayEvents.mapNotNull { g ->
+            val nodes = g.nodes.filter { node ->
+                val textOk = q.isEmpty() || node.searchBlob.contains(q)
+                val lensOk = when {
+                    activeLens == "all" -> true
+                    node is StreamNodeUi.Ambient -> false
+                    node is StreamNodeUi.Conversation -> {
+                        val ev = node.event
+                        when {
+                            activeLens == "self" -> ev.paras.any { it.isSelf && !it.isBackgroundNoise }
+                            activeLens == "joy" -> ev.isPositive
+                            activeLens.startsWith("spk:") -> {
+                                val id = activeLens.removePrefix("spk:")
+                                ev.paras.any { it.speakerId == id && !it.isBackgroundNoise }
+                            }
+                            activeLens.startsWith("plc:") -> {
+                                val id = activeLens.removePrefix("plc:").toIntOrNull()
+                                ev.place?.id == id
+                            }
+                            else -> true
+                        }
+                    }
+                    else -> true
+                }
+                textOk && lensOk
+            }
+            if (nodes.isEmpty()) null else g.copy(nodes = nodes)
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        if (lenses.size > 1) {
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                items(lenses, key = { it.id }) { lens ->
+                    val selected = activeLens == lens.id
+                    Surface(
+                        onClick = { activeLens = lens.id },
+                        shape = CircleShape,
+                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerLowest,
+                        contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        modifier = Modifier.pressScale(),
+                    ) {
+                        Text(
+                            text = lens.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 112.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (filteredGroups.isEmpty()) {
+                item(key = "empty_dialogue") {
+                    FeedEmptyState(q, activeLens != "all", mode, unconfigured, onOpenSettings)
+                }
+            }
+            filteredGroups.forEach { group ->
+                item(key = "dh_${group.day}", contentType = "day_header") {
+                    DayHeader(group.title, group.countLabel)
+                }
+                items(
+                    items = group.nodes,
+                    key = { it.key },
+                    contentType = { if (it is StreamNodeUi.Conversation) "dialogue_event" else "ambient_pill" },
+                ) { node ->
+                    when (node) {
+                        is StreamNodeUi.Ambient -> CenteredContextPill(
+                            text = "${node.span.spanLabel} · ${node.span.summaryText}",
+                        )
+                        is StreamNodeUi.Conversation -> DialogueEventGroup(
+                            ev = node.event,
+                            lens = activeLens,
+                            highlightQuery = q,
+                            playingName = playingName,
+                            isPlaying = isPlaying,
+                            playPosSec = playPosSec,
+                            onTapTurn = onTapTurn,
+                            onEditPlace = onEditPlace,
+                            onEditSpeaker = onEditSpeaker,
+                            onCopy = { onCopyEvent(node.event.copyText) },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DialogueEventGroup(
+    ev: EventUi,
+    lens: String,
+    highlightQuery: String,
+    playingName: String?,
+    isPlaying: Boolean,
+    playPosSec: Double,
+    onTapTurn: (Recording, Double) -> Unit,
+    onEditPlace: (Place) -> Unit,
+    onEditSpeaker: (String) -> Unit,
+    onCopy: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var showBg by remember(ev.key) { mutableStateOf(false) }
+    val queryHitsBg = highlightQuery.isNotBlank() && ev.paras.any { p ->
+        p.isBackgroundNoise && (p.textLower.contains(highlightQuery) || p.whoLower?.contains(highlightQuery) == true)
+    }
+    val bgExpanded = showBg || queryHitsBg
+    val baseParas = if (ev.bgParaCount == 0 || bgExpanded) ev.paras else ev.paras.filter { !it.isBackgroundNoise }
+    val shownParas = if (lens == "self") baseParas.filter { it.isSelf } else baseParas
+
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        // 居中时间/地点/环境锚点胶囊 + 轻量复制钮
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = colors.surfaceContainer,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 4.5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Text(
+                            text = ev.timeLabel,
+                            style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                            fontWeight = FontWeight.SemiBold,
+                            color = colors.onSurfaceVariant,
+                        )
+                        ev.place?.let { p ->
+                            Text(
+                                text = "· ${p.label}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = DeckTheme.colors.place,
+                                modifier = Modifier.clickable { onEditPlace(p) },
+                            )
+                        }
+                        ev.sceneSummary?.let { sc ->
+                            Text(
+                                text = "· $sc",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+                IconButton(onClick = onCopy, modifier = Modifier.size(26.dp).pressScale()) {
+                    Icon(
+                        Icons.Rounded.ContentCopy,
+                        contentDescription = "复制这段文字",
+                        modifier = Modifier.size(14.dp),
+                        tint = colors.onSurfaceVariant.copy(alpha = 0.7f),
+                    )
+                }
+            }
+        }
+
+        shownParas.forEach { p ->
+            val paraActive = playingName != null && p.lines.any { l ->
+                l.rec.name == playingName && playPosSec in (l.seg.start - 0.15)..(l.seg.end + 0.25)
+            }
+            DialogueBubbleRow(
+                p = p,
+                highlightQuery = highlightQuery,
+                active = paraActive,
+                isPlaying = paraActive && isPlaying,
+                onTapBubble = {
+                    val target = p.lines.firstOrNull { it.rec.hasAudio } ?: return@DialogueBubbleRow
+                    onTapTurn(target.rec, target.seg.start)
+                },
+                onEditSpeaker = onEditSpeaker,
+            )
+        }
+
+        if (ev.bgParaCount > 0 && !queryHitsBg && lens != "self") {
+            val mediaCnt = ev.paras.count { it.isBackgroundNoise && it.proximity == Proximity.MEDIA }
+            val kind = when {
+                mediaCnt == ev.bgParaCount -> "外放背景声"
+                mediaCnt > 0 -> "邻桌与外放声"
+                else -> "邻桌远场声"
+            }
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Surface(
+                    onClick = { showBg = !showBg },
+                    shape = CircleShape,
+                    color = colors.surfaceContainer.copy(alpha = 0.85f),
+                    modifier = Modifier.pressScale(),
+                ) {
+                    Text(
+                        text = if (showBg) "收起 ${ev.bgParaCount} 段$kind" else "已静默 ${ev.bgParaCount} 段$kind · 展开",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 4.5.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DialogueBubbleRow(
+    p: ParaUi,
+    highlightQuery: String,
+    active: Boolean,
+    isPlaying: Boolean,
+    onTapBubble: () -> Unit,
+    onEditSpeaker: (String) -> Unit,
+) {
+    val deck = DeckTheme.colors
+    val colors = MaterialTheme.colorScheme
+    val isSelf = p.isSelf && !p.isBackgroundNoise
+
+    val bubbleShape = if (isSelf) {
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp)
+    } else {
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 20.dp, bottomStart = 6.dp)
+    }
+    val bubbleBg = when {
+        p.isBackgroundNoise -> colors.surfaceContainer
+        isSelf -> deck.selfBubble
+        else -> colors.surfaceContainerLowest
+    }
+    val bubbleFg = when {
+        p.isBackgroundNoise -> colors.onSurfaceVariant
+        isSelf -> deck.onSelfBubble
+        else -> colors.onSurface
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isSelf) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        if (!isSelf) {
+            val orbText = p.who?.removePrefix("对话人 ")?.take(1) ?: "·"
+            Box(
+                modifier = Modifier
+                    .padding(end = 8.dp, bottom = 2.dp)
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(colors.surfaceContainerHigh)
+                    .let { m -> if (p.speakerId != null) m.clickable { onEditSpeaker(p.speakerId) } else m },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = orbText,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (p.speakerId != null) deck.accentBlue else colors.onSurfaceVariant,
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier.widthIn(max = 296.dp),
+            horizontalAlignment = if (isSelf) Alignment.End else Alignment.Start,
+        ) {
+            val showHeader = (!isSelf && p.who != null) || p.voiceCue != null || p.affectCue != null
+            if (showHeader) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    if (!isSelf && p.who != null) {
+                        Text(
+                            text = highlightMatches(p.who, highlightQuery),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = if (p.speakerId != null) deck.accentBlue else colors.onSurfaceVariant,
+                            modifier = if (p.speakerId != null) Modifier.clickable { onEditSpeaker(p.speakerId) } else Modifier,
+                        )
+                    }
+                    p.voiceCue?.let { cue ->
+                        HumanCuePill(cue, kind = CueKind.VOICE)
+                    }
+                    p.affectCue?.let { cue ->
+                        HumanCuePill(cue, kind = if (p.isPositive) CueKind.POSITIVE else if (p.isTense) CueKind.TENSE else CueKind.NEUTRAL)
+                    }
+                }
+            }
+
+            Surface(
+                onClick = onTapBubble,
+                enabled = p.hasAnyAudio,
+                shape = bubbleShape,
+                color = bubbleBg,
+                border = if (!isSelf && !p.isBackgroundNoise) {
+                    BorderStroke(1.dp, if (active) deck.accentBlue.copy(alpha = 0.55f) else colors.outlineVariant)
+                } else if (active) {
+                    BorderStroke(1.dp, deck.accentBlue.copy(alpha = 0.55f))
+                } else null,
+                shadowElevation = if (isSelf || p.isBackgroundNoise) 0.dp else 1.dp,
+                modifier = Modifier.pressScale(enabled = p.hasAnyAudio, pressedScale = 0.985f),
+            ) {
+                Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
+                    Text(
+                        text = highlightMatches(p.text, highlightQuery),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = bubbleFg,
+                    )
+
+                    // 气泡内原位语音波纹条（点击气泡回放时展开）
+                    AnimatedVisibility(visible = active) {
+                        Column {
+                            Spacer(Modifier.height(7.dp))
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isPlaying) "暂停" else "播放",
+                                    modifier = Modifier.size(15.dp),
+                                    tint = deck.accentBlue,
+                                )
+                                MiniStaticWaveBars(active = isPlaying, tint = deck.accentBlue)
+                                Text(
+                                    text = MainActivity.fmtDuration(p.durationSec.toDouble()),
+                                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                                    color = deck.accentBlue,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniStaticWaveBars(active: Boolean, tint: Color) {
+    val heights = remember { floatArrayOf(0.45f, 0.85f, 0.6f, 1.0f, 0.5f, 0.8f, 0.4f, 0.75f, 0.55f) }
+    val pulse = if (active) {
+        val anim by rememberInfiniteTransition(label = "wave").animateFloat(
+            initialValue = 0.7f,
+            targetValue = 1.05f,
+            animationSpec = infiniteRepeatable(tween(520), RepeatMode.Reverse),
+            label = "waveScale",
+        )
+        anim
+    } else 1f
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.5.dp),
+        modifier = Modifier.height(13.dp),
+    ) {
+        heights.forEachIndexed { i, h ->
+            val f = if (i % 2 == 0) (h * pulse).coerceIn(0.25f, 1f) else (h / pulse).coerceIn(0.25f, 1f)
+            Box(
+                Modifier
+                    .width(2.5.dp)
+                    .fillMaxHeight(f)
+                    .clip(CircleShape)
+                    .background(tint.copy(alpha = 0.85f)),
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 模式 C：无框左轴流（Editorial Stream · Things 3 / Apple 备忘录克制留白）
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Composable
+private fun EditorialStreamView(
     dayEvents: List<DayEventsGroup>,
     mode: WorkMode,
     unconfigured: Boolean,
@@ -2002,62 +2376,159 @@ private fun EventsPageView(
     val filteredGroups = remember(dayEvents, q) {
         if (q.isEmpty()) dayEvents
         else dayEvents.mapNotNull { g ->
-            val hits = g.events.filter { it.searchBlob.contains(q) }
-            if (hits.isEmpty()) null else g.copy(countLabel = "${hits.size} 段对话", events = hits)
+            val hits = g.nodes.filter { it.searchBlob.contains(q) }
+            if (hits.isEmpty()) null else g.copy(nodes = hits)
         }
     }
 
-    PageList {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 4.dp, bottom = 112.dp),
+    ) {
         if (filteredGroups.isEmpty()) {
-            item(key = "empty_events") {
-                if (q.isNotEmpty()) {
-                    EmptyStateCard(
-                        icon = Icons.Rounded.SearchOff,
-                        title = "没有匹配的对话记录",
-                        body = "试试缩短关键词，或搜索人名、地点名称。",
-                    )
-                } else {
-                    EmptyStateCard(
-                        icon = Icons.Rounded.Notes,
-                        title = "还没有对话文字",
-                        body = if (mode == WorkMode.DIRECT_ASR) {
-                            "开始录音后，手机会自动调用直连转写生成分段文字。"
-                        } else {
-                            "录音加密上传后，电脑端转写完会自动同步到这里。"
-                        },
-                        actionLabel = if (unconfigured) "去配置${mode.label}" else null,
-                        onAction = if (unconfigured) onOpenSettings else null,
-                    )
-                }
+            item(key = "empty_editorial") {
+                FeedEmptyState(q, false, mode, unconfigured, onOpenSettings)
             }
         }
-        filteredGroups.forEach { group ->
-            item(key = "d_${group.day}", contentType = "day_header") {
-                DayHeader(group.title, group.countLabel)
+        filteredGroups.forEachIndexed { gIdx, group ->
+            item(key = "eh_${group.day}", contentType = "editorial_day_header") {
+                Column {
+                    DayHeader(group.title, group.countLabel)
+                    if (gIdx == 0 && q.isEmpty() && group.events.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        EditorialDayPulseStrip(group.digest)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
             }
             items(
-                items = group.events,
-                key = { it.key },
-                contentType = { "event_card" },
-            ) { ev ->
-                EventCardView(
-                    ev = ev,
-                    highlightQuery = q,
-                    playingName = playingName,
-                    playPosSec = playPosSec,
-                    onSeekLine = onSeekLine,
-                    onEditPlace = onEditPlace,
-                    onEditSpeaker = onEditSpeaker,
-                    onCopy = { onCopyEvent(ev.copyText) },
-                )
+                items = group.nodes.indices.toList(),
+                key = { i -> group.nodes[i].key },
+                contentType = { "editorial_node" },
+            ) { idx ->
+                val node = group.nodes[idx]
+                val isLast = idx == group.nodes.lastIndex
+                when (node) {
+                    is StreamNodeUi.Ambient -> EditorialTimelineRow(
+                        timeHm = node.span.startHm,
+                        isQuiet = true,
+                        drawLine = !isLast,
+                    ) {
+                        Text(
+                            text = node.span.summaryText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f),
+                        )
+                    }
+                    is StreamNodeUi.Conversation -> EditorialConversationNode(
+                        ev = node.event,
+                        drawLine = !isLast,
+                        highlightQuery = q,
+                        playingName = playingName,
+                        playPosSec = playPosSec,
+                        onSeekLine = onSeekLine,
+                        onEditPlace = onEditPlace,
+                        onEditSpeaker = onEditSpeaker,
+                        onCopy = { onCopyEvent(node.event.copyText) },
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun EventCardView(
+private fun EditorialDayPulseStrip(digest: DayDigestStats) {
+    val colors = MaterialTheme.colorScheme
+    val deck = DeckTheme.colors
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = colors.surfaceContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            PulseMetricItem("有效开口", "${digest.talkMinutes} 分钟", colors.onSurface)
+            Box(Modifier.width(1.dp).height(20.dp).background(colors.outlineVariant))
+            PulseMetricItem("面对面人物", "${digest.peopleCount} 位", colors.onSurface)
+            Box(Modifier.width(1.dp).height(20.dp).background(colors.outlineVariant))
+            PulseMetricItem(
+                label = if (digest.mutedNoiseCount > 0) "已静默杂音 ${digest.mutedNoiseCount} 段" else "整体状态",
+                value = digest.vibeLabel,
+                valueColor = if (digest.vibePositive) deck.ledGreen else colors.onSurface,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PulseMetricItem(label: String, value: String, valueColor: Color) {
+    Column {
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleSmall.merge(TabularMono),
+            fontWeight = FontWeight.SemiBold,
+            color = valueColor,
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun EditorialTimelineRow(
+    timeHm: String,
+    isQuiet: Boolean,
+    drawLine: Boolean,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val deck = DeckTheme.colors
+    val axisColor = colors.outlineVariant
+    val dotBorder = if (isQuiet) colors.outline else deck.accentBlue
+    val paperBg = deck.paperCanvas
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                val x = 50.dp.toPx()
+                val cy = 9.dp.toPx()
+                if (drawLine) {
+                    drawLine(
+                        color = axisColor,
+                        start = Offset(x, cy + 5.dp.toPx()),
+                        end = Offset(x, size.height),
+                        strokeWidth = 1.dp.toPx(),
+                    )
+                }
+                drawCircle(color = dotBorder, radius = 4.dp.toPx(), center = Offset(x, cy))
+                drawCircle(color = paperBg, radius = 2.2.dp.toPx(), center = Offset(x, cy))
+            }
+            .padding(bottom = 18.dp),
+    ) {
+        Text(
+            text = timeHm,
+            style = MaterialTheme.typography.labelMedium.merge(TabularMono),
+            fontWeight = FontWeight.SemiBold,
+            color = if (isQuiet) colors.onSurfaceVariant.copy(alpha = 0.7f) else colors.onSurfaceVariant,
+            modifier = Modifier.width(58.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Column(Modifier.weight(1f), content = content)
+    }
+}
+
+@Composable
+private fun EditorialConversationNode(
     ev: EventUi,
+    drawLine: Boolean,
     highlightQuery: String,
     playingName: String?,
     playPosSec: Double,
@@ -2066,296 +2537,758 @@ private fun EventCardView(
     onEditSpeaker: (String) -> Unit,
     onCopy: () -> Unit,
 ) {
-    val deck = DeckTheme.colors
     val colors = MaterialTheme.colorScheme
-    val firstAudio = ev.firstAudioLine
+    val deck = DeckTheme.colors
+    var expanded by remember(ev.key) { mutableStateOf(false) }
+    var showBg by remember(ev.key) { mutableStateOf(false) }
+    val forceExpand = ev.isCompactNote || highlightQuery.isNotBlank()
+    val isOpen = expanded || forceExpand
 
-    SectionCard {
-        var showBackground by remember(ev.key) { mutableStateOf(false) }
-        val bgCount = ev.paras.count { it.isBackgroundNoise }
-        val queryHitsBg = highlightQuery.isNotBlank() && ev.paras.any { p ->
-            p.isBackgroundNoise && (
-                p.textLower.contains(highlightQuery) ||
-                    p.whoLower?.contains(highlightQuery) == true ||
-                    p.proxBadgeLabel?.lowercase()?.contains(highlightQuery) == true
-                )
-        }
-        val bgExpanded = showBackground || queryHitsBg
-        val activeParas = if (bgCount == 0 || bgExpanded) ev.paras else ev.paras.filter { !it.isBackgroundNoise }
-
-        val singleKnownSpeaker = activeParas.isNotEmpty() && activeParas.all { it.who != null } && activeParas.map { it.who }.distinct().size <= 1
-        val showLabels = (ev.peopleText.isNotEmpty() && !singleKnownSpeaker) || activeParas.size > 1
-        val singleProxBadge = if (!showLabels && activeParas.size == 1) activeParas[0].proxBadgeLabel else null
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = ev.timeLabel,
-                    style = MaterialTheme.typography.titleMedium.merge(TabularMono),
-                    fontWeight = FontWeight.SemiBold,
-                )
-                val hasTopMeta = ev.place != null || ev.sceneSummary != null || ev.speakerLevelsSummary != null || ev.avgDb != null || singleProxBadge != null || (!showLabels && ev.mood != null && ev.moodScore != null)
-                if (hasTopMeta) {
-                    Spacer(Modifier.height(4.dp))
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        ev.place?.let { p ->
-                            MetaTag(Icons.Rounded.Place, p.label, deck.place) { onEditPlace(p) }
-                        }
-                        ev.sceneSummary?.let { scene ->
-                            MetaTag(Icons.Rounded.GraphicEq, scene, colors.secondary)
-                        }
-                        if (ev.speakerLevelsSummary != null) {
-                            MetaTag(Icons.Rounded.Group, ev.speakerLevelsSummary, colors.tertiary)
-                        } else if (ev.avgDb != null) {
-                            MetaTag(Icons.Rounded.GraphicEq, formatDb(ev.avgDb), colors.onSurfaceVariant)
-                        }
-                        if (singleProxBadge != null) {
-                            ProximityBadge(singleProxBadge, activeParas[0].proximity)
-                        }
-                        if (!showLabels && ev.mood != null && ev.moodScore != null) {
-                            MoodBadge(ev.mood, ev.moodScore, ev.vocalTags.firstOrNull())
-                        }
-                    }
+    EditorialTimelineRow(
+        timeHm = ev.startHm,
+        isQuiet = false,
+        drawLine = drawLine,
+    ) {
+        // 顶部地点 / 时长 / 例外情绪线索行
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            FlowRow(
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                ev.place?.let { p ->
+                    Text(
+                        text = p.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = deck.place,
+                        modifier = Modifier.clickable { onEditPlace(p) },
+                    )
+                }
+                ev.durationLabel?.let { dur ->
+                    Text(
+                        text = if (ev.place != null) "· $dur" else dur,
+                        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                ev.sceneSummary?.let { sc ->
+                    val hasPrev = ev.place != null || ev.durationLabel != null
+                    Text(
+                        text = if (hasPrev) "· $sc" else sc,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                ev.eventVoiceCue?.let { HumanCuePill(it, CueKind.VOICE) }
+                ev.eventAffectCue?.let {
+                    HumanCuePill(it, if (ev.isPositive) CueKind.POSITIVE else if (ev.isTense) CueKind.TENSE else CueKind.NEUTRAL)
                 }
             }
-            IconButton(onClick = onCopy, modifier = Modifier.size(36.dp).pressScale()) {
+
+            IconButton(onClick = onCopy, modifier = Modifier.size(26.dp).pressScale()) {
                 Icon(
                     Icons.Rounded.ContentCopy,
                     contentDescription = "复制这段文字",
-                    modifier = Modifier.size(18.dp),
-                    tint = colors.onSurfaceVariant,
+                    modifier = Modifier.size(14.dp),
+                    tint = colors.onSurfaceVariant.copy(alpha = 0.72f),
                 )
             }
-            if (firstAudio != null) {
-                FilledTonalIconButton(
-                    onClick = { onSeekLine(firstAudio.rec, firstAudio.seg.start) },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.size(36.dp).pressScale(),
+            ev.firstAudioLine?.let { first ->
+                IconButton(
+                    onClick = { onSeekLine(first.rec, first.seg.start) },
+                    modifier = Modifier.size(26.dp).pressScale(),
                 ) {
-                    Icon(Icons.Rounded.PlayArrow, contentDescription = "从这里播放", modifier = Modifier.size(20.dp))
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-        var prevLabel: String? = null
-        var prevDb: Float? = null
-        var prevProx: String? = null
-        var prevMood: String? = null
-
-        val visibleParas = if (highlightQuery.isBlank() || activeParas.size <= 2) {
-            activeParas
-        } else {
-            val matchIdx = activeParas.indices.filter { i ->
-                activeParas[i].textLower.contains(highlightQuery) ||
-                    activeParas[i].whoLower?.contains(highlightQuery) == true
-            }
-            if (matchIdx.isEmpty()) activeParas
-            else activeParas.filterIndexed { i, _ -> matchIdx.any { abs(it - i) <= 1 } }
-        }
-
-        visibleParas.forEach { p ->
-            val label = p.who ?: "未识别"
-            val dbShifted = p.avgDb != null && prevDb != null && abs(p.avgDb - prevDb!!) >= 4.0f
-            val proxShifted = p.proximity != prevProx && p.proxBadgeLabel != null
-            val moodShifted = p.mood != null && prevMood != null && p.mood != prevMood
-            if (showLabels && (label != prevLabel || dbShifted || proxShifted || moodShifted)) {
-                Row(
-                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    val labelMod = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .let { m ->
-                            if (p.speakerId != null) m.clickable { onEditSpeaker(p.speakerId) } else m
-                        }
-                    Text(
-                        text = highlightMatches(label, highlightQuery),
-                        modifier = labelMod,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = if (p.speakerId != null) colors.tertiary else colors.onSurfaceVariant,
+                    Icon(
+                        Icons.Rounded.PlayArrow,
+                        contentDescription = "从这里播放",
+                        modifier = Modifier.size(17.dp),
+                        tint = deck.accentBlue,
                     )
-                    p.avgDb?.let { db ->
-                        Text(
-                            text = formatDb(db),
-                            style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                            color = colors.onSurfaceVariant.copy(alpha = 0.85f),
-                        )
-                    }
-                    p.proxBadgeLabel?.let { badge ->
-                        ProximityBadge(badge, p.proximity)
-                    }
-                    if (p.mood != null && p.moodScore != null) {
-                        MoodBadge(p.mood, p.moodScore, p.vocalTags.firstOrNull())
-                    }
                 }
             }
-            prevLabel = label
-            prevDb = p.avgDb
-            prevProx = p.proximity
-            prevMood = p.mood
+        }
 
-            val cardInvolvesPlaying = playingName != null && p.lines.any { it.rec.name == playingName }
-            val paraActive = cardInvolvesPlaying && p.lines.any { l ->
-                l.rec.name == playingName && playPosSec >= l.seg.start && playPosSec < l.seg.end + 0.3
-            }
+        if (ev.isCompactNote) {
+            val mainP = ev.paras.firstOrNull { !it.isBackgroundNoise } ?: ev.paras.first()
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = highlightMatches(mainP.text, highlightQuery),
+                style = MaterialTheme.typography.bodyLarge,
+                color = colors.onSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .let { m ->
+                        val audio = mainP.lines.firstOrNull { it.rec.hasAudio }
+                        if (audio != null) m.clickable { onSeekLine(audio.rec, audio.seg.start) } else m
+                    },
+            )
+        } else {
+            Spacer(Modifier.height(3.dp))
+            Text(
+                text = highlightMatches(ev.headline, highlightQuery),
+                style = MaterialTheme.typography.titleMedium,
+                color = colors.onSurface,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { expanded = !expanded },
+            )
 
-            // 非播放卡片对富文本做 remember 缓存，彻底免除滚动期间重复构建 AnnotatedString
-            val activeBucket = if (paraActive) (playPosSec * 4).toInt() else -1
-            val showInlineSentenceDb = p.lines.size > 1
-            val inlineDbColor = colors.outline
-            val annotatedPara = remember(p, highlightQuery, activeBucket, deck.signalRed, deck.signalRedContainer, inlineDbColor) {
-                buildAnnotatedString {
-                    p.lines.forEachIndexed { lineIdx, l ->
-                        val sentence = l.seg.text.trim()
-                        val lineActive = paraActive && l.rec.name == playingName &&
-                            playPosSec >= l.seg.start && playPosSec < l.seg.end + 0.3
-                        pushStringAnnotation("line", lineIdx.toString())
-                        if (lineActive) {
-                            pushStyle(
-                                SpanStyle(
-                                    color = deck.signalRed,
-                                    background = deck.signalRedContainer.copy(alpha = 0.6f),
-                                    fontWeight = FontWeight.Medium,
-                                ),
+            if (!isOpen) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = "「${ev.previewQuote}」",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    text = buildString {
+                        append("展开全篇 ${ev.fgParaCount} 段")
+                        if (ev.bgParaCount > 0) append(" · 已静默 ${ev.bgParaCount} 段背景声")
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = deck.accentBlue,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { expanded = true }
+                        .padding(vertical = 2.dp),
+                )
+            } else {
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = colors.surfaceContainer,
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val queryHitsBg = highlightQuery.isNotBlank() && ev.paras.any {
+                            it.isBackgroundNoise && it.textLower.contains(highlightQuery)
+                        }
+                        val activeParas = if (showBg || queryHitsBg || ev.bgParaCount == 0) {
+                            ev.paras
+                        } else {
+                            ev.paras.filter { !it.isBackgroundNoise }
+                        }
+
+                        activeParas.forEach { p ->
+                            val linePlaying = playingName != null && p.lines.any { l ->
+                                l.rec.name == playingName && playPosSec in (l.seg.start - 0.15)..(l.seg.end + 0.25)
+                            }
+                            EditorialTurnItem(
+                                p = p,
+                                highlightQuery = highlightQuery,
+                                active = linePlaying,
+                                onSeekLine = onSeekLine,
+                                onEditSpeaker = onEditSpeaker,
                             )
                         }
-                        append(buildHighlightedText(sentence, highlightQuery, deck.signalRedContainer, deck.onSignalRedContainer))
-                        if (showInlineSentenceDb && l.seg.db != null) {
-                            withStyle(
-                                SpanStyle(
-                                    fontSize = 11.sp,
-                                    fontFeatureSettings = "tnum",
-                                    color = if (lineActive) deck.signalRed else inlineDbColor,
-                                ),
-                            ) {
-                                append("\u00A0${l.seg.db.roundToInt()}dB ")
-                            }
+
+                        if (ev.bgParaCount > 0 && !queryHitsBg) {
+                            Text(
+                                text = if (showBg) "收起 ${ev.bgParaCount} 段远场/外放声" else "已静默 ${ev.bgParaCount} 段远场/外放声 · 点击查看",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { showBg = !showBg }
+                                    .padding(vertical = 2.dp),
+                            )
                         }
-                        if (lineActive) pop()
-                        pop()
                     }
                 }
-            }
-            var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (paraActive) colors.primaryContainer.copy(alpha = 0.4f) else Color.Transparent)
-                    .padding(vertical = 3.dp),
-            ) {
-                if (paraActive) {
-                    Box(
-                        Modifier
-                            .width(2.5.dp)
-                            .heightIn(min = 20.dp)
-                            .clip(CircleShape)
-                            .background(deck.signalRed),
+                if (!forceExpand) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "收起逐字稿",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = deck.accentBlue,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { expanded = false }
+                            .padding(vertical = 2.dp),
                     )
-                    Spacer(Modifier.width(8.dp))
                 }
-                Text(
-                    text = annotatedPara,
-                    onTextLayout = { layoutResult = it },
-                    modifier = Modifier
-                        .weight(1f)
-                        .let { m ->
-                            if (p.hasAnyAudio) {
-                                m.pointerInput(p.lines) {
-                                    detectTapGestures { tapOffset ->
-                                        val charOff = layoutResult?.getOffsetForPosition(tapOffset) ?: 0
-                                        val hitIdx = annotatedPara
-                                            .getStringAnnotations("line", charOff, charOff)
-                                            .firstOrNull()?.item?.toIntOrNull() ?: 0
-                                        val target = p.lines.getOrNull(hitIdx)?.takeIf { it.rec.hasAudio }
-                                            ?: p.lines.firstOrNull { it.rec.hasAudio }
-                                            ?: return@detectTapGestures
-                                        onSeekLine(target.rec, target.seg.start)
-                                    }
-                                }
-                            } else m
-                        },
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (p.isBackgroundNoise) colors.onSurfaceVariant.copy(alpha = 0.78f) else colors.onSurface,
-                )
             }
-        }
-
-        if (bgCount > 0 && !queryHitsBg) {
-            val mediaCnt = ev.paras.count { it.isBackgroundNoise && it.proximity == Proximity.MEDIA }
-            val kindText = when {
-                mediaCnt == bgCount -> "电子外放背景声"
-                mediaCnt > 0 -> "远场/外放背景声"
-                else -> "远场背景声"
-            }
-            val toggleText = if (showBackground) "收起 $bgCount 段$kindText" else "已折叠 $bgCount 段$kindText · 点击展开"
-            Spacer(Modifier.height(if (visibleParas.isEmpty()) 2.dp else 6.dp))
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(colors.surfaceContainerHigh.copy(alpha = 0.75f))
-                    .clickable { showBackground = !showBackground }
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.GraphicEq,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = colors.onSurfaceVariant,
-                )
-                Text(
-                    text = toggleText,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-private fun buildHighlightedText(
-    text: String,
-    query: String,
-    bg: Color,
-    fg: Color,
-): AnnotatedString {
-    if (query.isBlank()) return AnnotatedString(text)
-    val lower = text.lowercase()
-    return buildAnnotatedString {
-        var idx = 0
-        while (idx < text.length) {
-            val hit = lower.indexOf(query, idx)
-            if (hit < 0) {
-                append(text.substring(idx))
-                break
-            }
-            if (hit > idx) append(text.substring(idx, hit))
-            withStyle(SpanStyle(background = bg, color = fg, fontWeight = FontWeight.SemiBold)) {
-                append(text.substring(hit, hit + query.length))
-            }
-            idx = hit + query.length
         }
     }
 }
 
 @Composable
-private fun highlightMatches(text: String, query: String): AnnotatedString {
-    if (query.isBlank()) return AnnotatedString(text)
+private fun EditorialTurnItem(
+    p: ParaUi,
+    highlightQuery: String,
+    active: Boolean,
+    onSeekLine: (Recording, Double) -> Unit,
+    onEditSpeaker: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
     val deck = DeckTheme.colors
-    return remember(text, query, deck.signalRedContainer, deck.onSignalRedContainer) {
-        buildHighlightedText(text, query, deck.signalRedContainer, deck.onSignalRedContainer)
+    var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+
+    val annotated = remember(p.lines, highlightQuery, deck.signalRedContainer, deck.onSignalRedContainer) {
+        buildAnnotatedString {
+            p.lines.forEachIndexed { idx, l ->
+                pushStringAnnotation("line", idx.toString())
+                append(
+                    buildHighlightedText(
+                        l.seg.text.trim(),
+                        highlightQuery,
+                        deck.signalRedContainer,
+                        deck.onSignalRedContainer,
+                    ),
+                )
+                pop()
+            }
+        }
+    }
+
+    Column {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val whoLabel = p.who ?: "未命名"
+            Text(
+                text = highlightMatches(whoLabel, highlightQuery),
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = when {
+                    p.isSelf -> deck.accentBlue
+                    p.speakerId != null -> colors.onSurface
+                    else -> colors.onSurfaceVariant
+                },
+                modifier = if (p.speakerId != null) Modifier.clickable { onEditSpeaker(p.speakerId) } else Modifier,
+            )
+            p.voiceCue?.let { HumanCuePill(it, CueKind.VOICE) }
+            p.affectCue?.let {
+                HumanCuePill(it, if (p.isPositive) CueKind.POSITIVE else if (p.isTense) CueKind.TENSE else CueKind.NEUTRAL)
+            }
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = annotated,
+            onTextLayout = { layoutResult = it },
+            style = MaterialTheme.typography.bodyMedium,
+            color = when {
+                active -> deck.accentBlue
+                p.isBackgroundNoise -> colors.onSurfaceVariant
+                else -> colors.onSurface
+            },
+            modifier = Modifier.let { m ->
+                if (p.hasAnyAudio) {
+                    m.pointerInput(p.lines) {
+                        detectTapGestures { offset ->
+                            val charOff = layoutResult?.getOffsetForPosition(offset) ?: 0
+                            val hitIdx = annotated.getStringAnnotations("line", charOff, charOff)
+                                .firstOrNull()?.item?.toIntOrNull() ?: 0
+                            val target = p.lines.getOrNull(hitIdx)?.takeIf { it.rec.hasAudio }
+                                ?: p.lines.firstOrNull { it.rec.hasAudio }
+                                ?: return@detectTapGestures
+                            onSeekLine(target.rec, target.seg.start)
+                        }
+                    }
+                } else m
+            },
+        )
     }
 }
 
-// ───────────────────── Tab 2：录音（主线程零磁盘 I/O） ─────────────────────
+// ───────────────────── 底部 iOS 18 悬浮毛玻璃胶囊栏 + 搜索 + 迷你播放器 ─────────────────────
+
+@Composable
+private fun FloatingGlassDock(
+    tabs: List<String>,
+    selectedTab: Int,
+    searchOpen: Boolean,
+    searchQuery: String,
+    player: Player,
+    showMiniPlayer: Boolean,
+    onSelectTab: (Int) -> Unit,
+    onToggleSearch: () -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val deck = DeckTheme.colors
+    val colors = MaterialTheme.colorScheme
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        AnimatedVisibility(
+            visible = showMiniPlayer && player.current != null,
+            enter = expandVertically() + fadeIn(tween(150)),
+            exit = shrinkVertically() + fadeOut(tween(120)),
+        ) {
+            FloatingMiniPlayerCard(player)
+        }
+
+        AnimatedVisibility(
+            visible = searchOpen,
+            enter = expandVertically(spring(stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(150)),
+            exit = shrinkVertically(spring(stiffness = Spring.StiffnessMedium)) + fadeOut(tween(120)),
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = colors.surfaceContainerLowest,
+                border = BorderStroke(1.dp, colors.outlineVariant),
+                shadowElevation = 8.dp,
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = onSearchQueryChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    shape = CircleShape,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                    ),
+                    placeholder = { Text("搜索对话文字、人物或地点…") },
+                    leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                    trailingIcon = {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 6.dp)) {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { onSearchQueryChange("") }, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "清空搜索", modifier = Modifier.size(17.dp))
+                                }
+                            }
+                            TextButton(onClick = onToggleSearch) { Text("收起") }
+                        }
+                    },
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Surface(
+                modifier = Modifier.weight(1f).height(48.dp),
+                shape = CircleShape,
+                color = deck.glassSurface,
+                border = BorderStroke(1.dp, colors.outlineVariant),
+                shadowElevation = 10.dp,
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize().padding(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    tabs.forEachIndexed { idx, title ->
+                        val active = selectedTab == idx
+                        val tabBg by animateColorAsState(
+                            if (active) colors.surfaceContainerLowest else Color.Transparent,
+                            tween(180),
+                            label = "tabPillBg",
+                        )
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(CircleShape)
+                                .background(tabBg)
+                                .clickable { onSelectTab(idx) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = title,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (active) colors.onSurface else colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+
+            Surface(
+                onClick = onToggleSearch,
+                modifier = Modifier.size(48.dp).pressScale(),
+                shape = CircleShape,
+                color = if (searchOpen) colors.primary else deck.glassSurface,
+                contentColor = if (searchOpen) colors.onPrimary else colors.onSurface,
+                border = BorderStroke(1.dp, if (searchOpen) Color.Transparent else colors.outlineVariant),
+                shadowElevation = 10.dp,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = if (searchOpen) "收起搜索" else "搜索记录",
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FloatingMiniPlayerCard(player: Player) {
+    val r = player.current ?: return
+    var dragging by remember { mutableStateOf<Float?>(null) }
+    val haptic = LocalHapticFeedback.current
+    val deck = DeckTheme.colors
+    val colors = MaterialTheme.colorScheme
+    val dur = player.durationMs.coerceAtLeast(1)
+    val shown = dragging?.let { (it * dur).toInt() } ?: player.positionMs
+
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = colors.surfaceContainerLowest,
+        border = BorderStroke(1.dp, colors.outlineVariant),
+        shadowElevation = 12.dp,
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "${r.start.toLocalDate().format(MainActivity.MD)} ${r.start.plusSeconds((shown / 1000).toLong()).format(MainActivity.T)}",
+                        style = MaterialTheme.typography.labelLarge.merge(TabularMono),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "${MainActivity.fmtMs(shown)} / ${MainActivity.fmtMs(player.durationMs)}",
+                        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                IconButton(onClick = { player.skip(-10_000) }, modifier = Modifier.size(34.dp).pressScale()) {
+                    Icon(Icons.Rounded.Replay10, contentDescription = "后退 10 秒", modifier = Modifier.size(19.dp))
+                }
+                FilledIconButton(
+                    onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        player.toggle()
+                    },
+                    shape = CircleShape,
+                    modifier = Modifier.size(36.dp).pressScale(),
+                ) {
+                    Icon(
+                        if (player.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = if (player.playing) "暂停" else "播放",
+                        modifier = Modifier.size(19.dp),
+                    )
+                }
+                IconButton(onClick = { player.skip(10_000) }, modifier = Modifier.size(34.dp).pressScale()) {
+                    Icon(Icons.Rounded.Forward10, contentDescription = "前进 10 秒", modifier = Modifier.size(19.dp))
+                }
+                IconButton(onClick = { player.close() }, modifier = Modifier.size(34.dp).pressScale()) {
+                    Icon(Icons.Rounded.Close, contentDescription = "关闭播放器", modifier = Modifier.size(18.dp))
+                }
+            }
+
+            Spacer(Modifier.height(6.dp))
+            var wave by remember(r.name) { mutableStateOf(Waveforms.cached(r.file)) }
+            LaunchedEffect(r.name) { if (wave == null && r.hasAudio) wave = Waveforms.get(r.file) }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.surfaceContainer)
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+            ) {
+                Waveform(
+                    levels = wave,
+                    modifier = Modifier.fillMaxWidth().height(26.dp),
+                    progress = dragging ?: (player.positionMs.toFloat() / dur),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.5f),
+                    playedColor = colors.onSurface,
+                    playheadColor = deck.accentBlue,
+                    onSeekPreview = { pos ->
+                        if (dragging == null) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        dragging = pos
+                    },
+                    onSeek = { pos ->
+                        player.seekTo((pos * dur).toInt())
+                        dragging = null
+                    },
+                )
+            }
+        }
+    }
+}
+
+// ───────────────────── 人物 / 足迹 / 原始录音独立归档页 ─────────────────────
+
+@Composable
+private fun PeoplePageView(
+    people: List<PersonCardUi>,
+    unnamedCount: Int,
+    onPlayClip: (Pair<Recording, Segment>) -> Unit,
+    onRename: (Speaker) -> Unit,
+    onMarkSelf: (Speaker) -> Unit,
+    onMerge: (Speaker) -> Unit,
+    onUnmerge: (String) -> Unit,
+) {
+    val hasSelf = remember(people) { people.any { it.isSelf } }
+    PageList {
+        if (people.isEmpty()) {
+            item(key = "empty_people") {
+                EmptyStateCard(
+                    icon = Icons.Rounded.Group,
+                    title = "尚无声纹人物档案",
+                    body = "面对面说话满 10 秒后，本机声纹引擎会自动建立档案（自动忽略远场与外放杂音）。",
+                )
+            }
+        } else if (!hasSelf) {
+            item(key = "hint_self") {
+                Hint("点自己声音卡片上的「设为我」，即可在气泡流中将你的话自动排在右侧浅蓝气泡。")
+            }
+        } else if (unnamedCount >= 2) {
+            item(key = "hint_people") {
+                Hint("有未命名声音时，可先试听原声，再起名或合并同一人。")
+            }
+        }
+        items(people, key = { it.speaker.id }, contentType = { "person_card" }) { item ->
+            val p = item.speaker
+            val deck = DeckTheme.colors
+            SectionCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Avatar(
+                        text = if (item.isSelf) "我" else (p.name?.take(1) ?: "#"),
+                        bg = if (item.isSelf) deck.accentBlueContainer else MaterialTheme.colorScheme.secondaryContainer,
+                        fg = if (item.isSelf) deck.accentBlue else MaterialTheme.colorScheme.onSecondaryContainer,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text(
+                                text = p.name ?: if (item.isSelf) "我（本人）" else p.defaultName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            if (item.isSelf) {
+                                HumanCuePill("佩戴者", CueKind.POSITIVE)
+                            }
+                        }
+                        Text(
+                            text = "${item.count} 句对话" + if (item.aliases.isNotEmpty()) " · 已合并 ${item.aliases.size} 个声纹" else "",
+                            style = MaterialTheme.typography.labelMedium.merge(TabularMono),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (people.size > 1 || item.aliases.isNotEmpty()) {
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menu = true }) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            DropdownMenu(menu, onDismissRequest = { menu = false }) {
+                                if (people.size > 1) {
+                                    DropdownMenuItem(
+                                        text = { Text("合并到其他人…") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Rounded.MergeType, contentDescription = null) },
+                                        onClick = { menu = false; onMerge(p) },
+                                    )
+                                }
+                                item.aliases.forEach { a ->
+                                    DropdownMenuItem(
+                                        text = { Text("拆出 ${a.name ?: a.defaultName}") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Rounded.CallSplit, contentDescription = null) },
+                                        onClick = { menu = false; onUnmerge(a.id) },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                item.quote?.let { quote ->
+                    Spacer(Modifier.height(10.dp))
+                    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceContainer) {
+                        Text(
+                            text = "「$quote」",
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    item.clip?.let { c -> ActionChip(Icons.Rounded.PlayArrow, "试听原声") { onPlayClip(c) } }
+                    ActionChip(Icons.Rounded.Edit, "改名") { onRename(p) }
+                    if (!item.isSelf && !hasSelf) {
+                        ActionChip(Icons.Rounded.Person, "设为我") { onMarkSelf(p) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlacesPageView(
+    places: List<PlaceCardUi>,
+    hasLocation: Boolean,
+    onRequestLocation: () -> Unit,
+    onRename: (Place) -> Unit,
+    onMerge: (Place) -> Unit,
+    onUnmerge: (Int) -> Unit,
+) {
+    val deck = DeckTheme.colors
+    PageList {
+        if (places.isEmpty()) {
+            item(key = "empty_places") {
+                EmptyStateCard(
+                    icon = if (hasLocation) Icons.Rounded.Place else Icons.Rounded.LocationOff,
+                    title = if (hasLocation) "还没有记录到足迹" else "定位权限未开启",
+                    body = "开启后自动在本地标记驻留位置，所有足迹仅保存在这部手机上。",
+                    actionLabel = if (!hasLocation) "开启定位" else null,
+                    onAction = if (!hasLocation) onRequestLocation else null,
+                )
+            }
+        } else {
+            if (!hasLocation) {
+                item(key = "loc_disabled") {
+                    SectionCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Rounded.LocationOff, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("定位已关闭", style = MaterialTheme.typography.titleSmall)
+                                Text("新录音将不再标记位置（已有足迹仍保留在本机）。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            FilledTonalButton(
+                                onClick = onRequestLocation,
+                                shape = MaterialTheme.shapes.small,
+                                modifier = Modifier.pressScale(),
+                            ) { Text("开启") }
+                        }
+                    }
+                }
+            }
+        }
+        items(places, key = { it.place.id }, contentType = { "place_card" }) { item ->
+            val p = item.place
+            SectionCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(deck.placeContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Rounded.Place, contentDescription = null, tint = deck.place)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(p.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        if (p.name != null && p.auto != null) {
+                            Text(p.auto, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        p.area?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (item.statsLine.isNotEmpty()) {
+                            Text(
+                                text = item.statsLine,
+                                style = MaterialTheme.typography.labelMedium.merge(TabularMono),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ActionChip(Icons.Rounded.Edit, "改名") { onRename(p) }
+                    if (places.size > 1) ActionChip(Icons.AutoMirrored.Rounded.MergeType, "合并") { onMerge(p) }
+                    item.aliases.forEach { a ->
+                        ActionChip(Icons.AutoMirrored.Rounded.CallSplit, "拆出 ${a.label}") { onUnmerge(a.id) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RawRecordingsScreen(
+    dayRecordings: List<DayRecordingsGroup>,
+    mode: WorkMode,
+    asrConfigured: Boolean,
+    player: Player,
+    onBack: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    var query by rememberSaveable { mutableStateOf("") }
+
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                navigationIcon = {
+                    IconButton(onClick = onBack, modifier = Modifier.pressScale()) {
+                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                title = { Text("原始录音归档", fontWeight = FontWeight.SemiBold) },
+            )
+        },
+        bottomBar = {
+            if (player.current != null) {
+                Box(Modifier.navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    FloatingMiniPlayerCard(player)
+                }
+            }
+        },
+    ) { pad ->
+        Column(Modifier.padding(pad).fillMaxSize()) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                singleLine = true,
+                shape = CircleShape,
+                placeholder = { Text("按时间、地点或内容筛选切片…") },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Rounded.Close, contentDescription = "清空")
+                        }
+                    }
+                },
+            )
+            RecordingsPageView(
+                dayRecordings = dayRecordings,
+                mode = mode,
+                asrConfigured = asrConfigured,
+                query = query,
+                selectedFile = player.current?.name,
+                isPlaying = player.playing,
+                playProgress = if (player.current != null && player.durationMs > 0) {
+                    (player.positionMs.toFloat() / player.durationMs).coerceIn(0f, 1f)
+                } else 0f,
+                onToggleOrOpen = { rec ->
+                    if (player.current?.name == rec.name) player.toggle() else player.open(rec)
+                },
+                onSelectCard = { rec ->
+                    if (player.current?.name != rec.name) player.open(rec)
+                },
+            )
+        }
+    }
+}
 
 @Composable
 private fun RecordingsPageView(
@@ -2398,8 +3331,8 @@ private fun RecordingsPageView(
             item(key = "empty_recs") {
                 EmptyStateCard(
                     icon = Icons.Rounded.GraphicEq,
-                    title = if (q.isNotEmpty()) "没有匹配的录音片段" else "还没有录音片段",
-                    body = if (q.isNotEmpty()) "换个时间或关键词再试一次。" else "开始录音后，每 5 分钟自动封存一段音频。",
+                    title = if (q.isNotEmpty()) "没有匹配的录音切片" else "还没有录音切片",
+                    body = if (q.isNotEmpty()) "换个时间或关键词再试一次。" else "开始录音后，系统会按自然对话与安静时段自动归档。",
                 )
             }
         }
@@ -2433,29 +3366,29 @@ private fun resolveRecordingStatus(
     asrConfigured: Boolean,
     sync: ActiveSyncSlice,
 ): String = when (item.baseStatus) {
-    BaseChunkStatus.TRANSCRIBED -> "已转写"
-    BaseChunkStatus.TRANSCRIBED_EMPTY -> "已转写（无有效人声）"
+    BaseChunkStatus.TRANSCRIBED -> "已整理"
+    BaseChunkStatus.TRANSCRIBED_EMPTY -> "已整理（无人声）"
     BaseChunkStatus.AUDIO_EXPIRED -> "录音已过期"
-    BaseChunkStatus.SILENT -> if (mode == WorkMode.DIRECT_ASR) "无人声，已跳过" else "无人声，未上传"
-    BaseChunkStatus.FAR_SKIPPED -> if (mode == WorkMode.DIRECT_ASR) "远场/外放，已跳过" else "远场/外放，未上传"
+    BaseChunkStatus.SILENT -> "安静留白"
+    BaseChunkStatus.FAR_SKIPPED -> "远场/外放，已静默"
     BaseChunkStatus.BAD_AUDIO -> "音频异常，已跳过"
     BaseChunkStatus.UPLOADED -> when {
         mode == WorkMode.DIRECT_ASR -> when {
-            sync.localAsrRunning == item.rec.name -> "手机转写中…"
+            sync.localAsrRunning == item.rec.name -> "正在整理…"
             !asrConfigured -> "待配直连转写"
-            sync.hasLocalAsrError -> "转写待重试"
-            else -> "排队手机转写"
+            sync.hasLocalAsrError -> "整理待重试"
+            else -> "排队整理"
         }
-        sync.workerOnline && sync.workerPhase == "transcribing" && sync.workerCurrent == item.rec.name -> "电脑转写中…"
+        sync.workerOnline && sync.workerPhase == "transcribing" && sync.workerCurrent == item.rec.name -> "电脑整理中…"
         sync.mailboxReachable == true && !sync.workerOnline -> "已上传 · 等电脑上线"
-        else -> "排队转写中"
+        else -> "排队整理中"
     }
     BaseChunkStatus.PENDING -> if (mode == WorkMode.DIRECT_ASR) {
         when {
-            sync.localAsrRunning == item.rec.name -> "手机转写中…"
+            sync.localAsrRunning == item.rec.name -> "正在整理…"
             !asrConfigured -> "待配直连转写"
-            sync.hasLocalAsrError -> "转写待重试"
-            else -> "排队手机转写"
+            sync.hasLocalAsrError -> "整理待重试"
+            else -> "排队整理"
         }
     } else {
         "待加密上传"
@@ -2486,7 +3419,7 @@ private fun RecordingCardItem(
             FilledTonalIconButton(
                 enabled = r.hasAudio,
                 onClick = onToggleOrOpen,
-                shape = RoundedCornerShape(10.dp),
+                shape = CircleShape,
                 modifier = Modifier.size(40.dp).pressScale(enabled = r.hasAudio),
             ) {
                 Icon(
@@ -2512,10 +3445,14 @@ private fun RecordingCardItem(
                 Spacer(Modifier.height(4.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     StatusPill(statusText)
-                    item.placeLabel?.let { MetaTag(Icons.Rounded.Place, it, deck.place) }
-                    item.sceneSummary?.let { MetaTag(Icons.Rounded.GraphicEq, it, colors.secondary) }
-                    if (item.mood != null && item.moodScore != null) {
-                        MoodBadge(item.mood, item.moodScore)
+                    item.placeLabel?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = deck.place)
+                    }
+                    item.sceneSummary?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
+                    item.affectCue?.let {
+                        HumanCuePill(it, if (item.isPositive) CueKind.POSITIVE else CueKind.NEUTRAL)
                     }
                 }
             }
@@ -2526,18 +3463,17 @@ private fun RecordingCardItem(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(deck.tapeWell)
-                    .border(1.dp, deck.tapeGroove, RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(colors.surfaceContainer)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
                 Waveform(
                     levels = wave,
                     modifier = Modifier.fillMaxWidth().height(28.dp),
                     progress = progress,
-                    color = colors.onSurfaceVariant.copy(alpha = 0.65f),
+                    color = colors.onSurfaceVariant.copy(alpha = 0.55f),
                     playedColor = colors.onSurface,
-                    playheadColor = if (selected) deck.signalRed else null,
+                    playheadColor = if (selected) deck.accentBlue else null,
                 )
             }
         }
@@ -2554,410 +3490,81 @@ private fun RecordingCardItem(
     }
 }
 
-// ───────────────────── Tab 3 & Tab 4：人物与地点 ─────────────────────
+// ───────────────────── 共享日常原子组件与纯函数 ─────────────────────
+
+private enum class CueKind { VOICE, POSITIVE, TENSE, NEUTRAL }
 
 @Composable
-private fun PeoplePageView(
-    people: List<PersonCardUi>,
-    unnamedCount: Int,
-    onPlayClip: (Pair<Recording, Segment>) -> Unit,
-    onRename: (Speaker) -> Unit,
-    onMerge: (Speaker) -> Unit,
-    onUnmerge: (String) -> Unit,
-) {
-    PageList {
-        if (people.isEmpty()) {
-            item(key = "empty_people") {
-                EmptyStateCard(
-                    icon = Icons.Rounded.Group,
-                    title = "尚无声纹人物档案",
-                    body = "录音中单人说话满 10 秒后，本机内置声纹模型会自动建档（豆包直连同样支持），可试听、起名或合并。",
-                )
-            }
-        } else if (unnamedCount >= 2) {
-            item(key = "hint_people") {
-                Hint("有多个未命名编号时，可先试听原声，再从卡片菜单合并同一人。")
-            }
-        }
-        items(people, key = { it.speaker.id }, contentType = { "person_card" }) { item ->
-            val p = item.speaker
-            SectionCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Avatar(
-                        text = p.name?.take(1) ?: "#",
-                        bg = MaterialTheme.colorScheme.tertiaryContainer,
-                        fg = MaterialTheme.colorScheme.onTertiaryContainer,
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = p.name ?: p.defaultName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (p.name == null) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                        )
-                        Text(
-                            text = "${item.count} 句" + if (item.aliases.isNotEmpty()) " · 已合并 ${item.aliases.size} 个声纹" else "",
-                            style = MaterialTheme.typography.labelMedium.merge(TabularMono),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    if (people.size > 1 || item.aliases.isNotEmpty()) {
-                        var menu by remember { mutableStateOf(false) }
-                        Box {
-                            IconButton(onClick = { menu = true }) {
-                                Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            DropdownMenu(menu, onDismissRequest = { menu = false }) {
-                                if (people.size > 1) {
-                                    DropdownMenuItem(
-                                        text = { Text("合并到其他人…") },
-                                        leadingIcon = { Icon(Icons.Rounded.MergeType, contentDescription = null) },
-                                        onClick = { menu = false; onMerge(p) },
-                                    )
-                                }
-                                item.aliases.forEach { a ->
-                                    DropdownMenuItem(
-                                        text = { Text("拆出 ${a.name ?: a.defaultName}") },
-                                        leadingIcon = { Icon(Icons.Rounded.CallSplit, contentDescription = null) },
-                                        onClick = { menu = false; onUnmerge(a.id) },
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                item.quote?.let { quote ->
-                    Spacer(Modifier.height(8.dp))
-                    Surface(shape = RoundedCornerShape(8.dp), color = DeckTheme.colors.tapeWell) {
-                        Text(
-                            text = "「$quote」",
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item.clip?.let { c -> ActionChip(Icons.Rounded.PlayArrow, "试听原声") { onPlayClip(c) } }
-                    ActionChip(Icons.Rounded.Edit, "改名") { onRename(p) }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlacesPageView(
-    places: List<PlaceCardUi>,
-    hasLocation: Boolean,
-    onRequestLocation: () -> Unit,
-    onRename: (Place) -> Unit,
-    onMerge: (Place) -> Unit,
-    onUnmerge: (Int) -> Unit,
-) {
-    val deck = DeckTheme.colors
-    PageList {
-        if (places.isEmpty()) {
-            item(key = "empty_places") {
-                EmptyStateCard(
-                    icon = if (hasLocation) Icons.Rounded.Place else Icons.Rounded.LocationOff,
-                    title = if (hasLocation) "还没有记录到地点" else "定位权限未开启",
-                    body = "开启后每 5 分钟在手机本地标记对话位置，位置只存在本机，绝不上传服务器。",
-                    actionLabel = if (!hasLocation) "开启定位" else null,
-                    onAction = if (!hasLocation) onRequestLocation else null,
-                )
-            }
-        } else {
-            if (!hasLocation) {
-                item(key = "loc_disabled") {
-                    SectionCard {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Rounded.LocationOff, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text("定位已关闭", style = MaterialTheme.typography.titleSmall)
-                                Text("新录音将不再标记位置（已有地点仍保留在本机）。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            FilledTonalButton(
-                                onClick = onRequestLocation,
-                                shape = RoundedCornerShape(8.dp),
-                                modifier = Modifier.pressScale(),
-                            ) { Text("重新开启") }
-                        }
-                    }
-                }
-            }
-            item(key = "places_hint") { Hint("所有地点仅保存在这部手机上，可改名或合并常用场所。") }
-        }
-        items(places, key = { it.place.id }, contentType = { "place_card" }) { item ->
-            val p = item.place
-            SectionCard {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(deck.placeContainer),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(Icons.Rounded.Place, contentDescription = null, tint = deck.place)
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(p.label, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        if (p.name != null && p.auto != null) {
-                            Text(p.auto, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        p.area?.let {
-                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        if (item.statsLine.isNotEmpty()) {
-                            Text(
-                                text = item.statsLine,
-                                style = MaterialTheme.typography.labelMedium.merge(TabularMono),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ActionChip(Icons.Rounded.Edit, "改名") { onRename(p) }
-                    if (places.size > 1) ActionChip(Icons.Rounded.MergeType, "合并") { onMerge(p) }
-                    item.aliases.forEach { a ->
-                        ActionChip(Icons.Rounded.CallSplit, "拆出 ${a.label}") { onUnmerge(a.id) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ───────────────────── 底部紧凑回放台与通用机械构件 ─────────────────────
-
-@Composable
-private fun TapePlayerDeck(player: Player) {
-    val r = player.current ?: return
-    val ctx = androidx.compose.ui.platform.LocalContext.current
-    var dragging by remember { mutableStateOf<Float?>(null) }
-    var showText by remember { mutableStateOf(false) }
-    val haptic = LocalHapticFeedback.current
+private fun HumanCuePill(label: String, kind: CueKind) {
     val deck = DeckTheme.colors
     val colors = MaterialTheme.colorScheme
-    val dur = player.durationMs.coerceAtLeast(1)
-    val shown = dragging?.let { (it * dur).toInt() } ?: player.positionMs
-    val tr = remember(r.name) { Transcripts.get(ctx, r.name) }
-
-    Surface(
-        color = colors.surfaceContainerLowest,
-        shadowElevation = 10.dp,
-        border = BorderStroke(1.dp, colors.outlineVariant),
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
-        ) {
-            AnimatedVisibility(visible = showText && tr != null) {
-                if (tr != null) TranscriptPane(r = r, tr = tr, player = player)
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TapeReelsGraphic(spinning = player.playing)
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = "${r.start.toLocalDate().format(MainActivity.MD)} ${r.start.plusSeconds((shown / 1000).toLong()).format(MainActivity.T)}",
-                        style = MaterialTheme.typography.labelLarge.merge(TabularMono),
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "${MainActivity.fmtMs(shown)} / ${MainActivity.fmtMs(player.durationMs)}",
-                        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                        color = colors.onSurfaceVariant,
-                    )
-                }
-                if (tr?.segments?.isNotEmpty() == true) {
-                    IconToggleButton(
-                        checked = showText,
-                        onCheckedChange = { showText = it },
-                        modifier = Modifier.size(36.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.Subtitles,
-                            contentDescription = if (showText) "收起字幕" else "展开字幕",
-                            modifier = Modifier.size(20.dp),
-                            tint = if (showText) deck.signalRed else colors.onSurfaceVariant,
-                        )
-                    }
-                }
-                IconButton(onClick = { player.skip(-10_000) }, modifier = Modifier.size(36.dp).pressScale()) {
-                    Icon(Icons.Rounded.Replay10, contentDescription = "后退 10 秒", modifier = Modifier.size(20.dp))
-                }
-                FilledIconButton(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        player.toggle()
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.size(40.dp).pressScale(),
-                ) {
-                    Icon(
-                        if (player.playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                        contentDescription = if (player.playing) "暂停" else "播放",
-                    )
-                }
-                IconButton(onClick = { player.skip(10_000) }, modifier = Modifier.size(36.dp).pressScale()) {
-                    Icon(Icons.Rounded.Forward10, contentDescription = "前进 10 秒", modifier = Modifier.size(20.dp))
-                }
-                IconButton(onClick = { player.close() }, modifier = Modifier.size(36.dp).pressScale()) {
-                    Icon(Icons.Rounded.Close, contentDescription = "关闭播放器", modifier = Modifier.size(20.dp))
-                }
-            }
-
-            Spacer(Modifier.height(6.dp))
-
-            var wave by remember(r.name) { mutableStateOf(Waveforms.cached(r.file)) }
-            LaunchedEffect(r.name) { if (wave == null) wave = Waveforms.get(r.file) }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(end = 4.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(deck.tapeWell)
-                    .border(1.dp, deck.tapeGroove, RoundedCornerShape(8.dp))
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            ) {
-                Waveform(
-                    levels = wave,
-                    modifier = Modifier.fillMaxWidth().height(34.dp),
-                    progress = dragging ?: (player.positionMs.toFloat() / dur),
-                    color = colors.onSurfaceVariant.copy(alpha = 0.6f),
-                    playedColor = colors.onSurface,
-                    playheadColor = deck.signalRed,
-                    onSeekPreview = { pos ->
-                        if (dragging == null) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        dragging = pos
-                    },
-                    onSeek = { pos ->
-                        player.seekTo((pos * dur).toInt())
-                        dragging = null
-                    },
-                )
-            }
+    val (bg, fg) = when (kind) {
+        CueKind.POSITIVE -> deck.ledGreen.copy(alpha = 0.12f) to deck.ledGreen
+        CueKind.TENSE -> deck.signalRed.copy(alpha = 0.12f) to deck.signalRed
+        CueKind.VOICE -> if (label == "轻声") {
+            deck.placeContainer to deck.place
+        } else if (label == "声音洪亮") {
+            deck.ledAmber.copy(alpha = 0.14f) to deck.ledAmber
+        } else {
+            colors.surfaceContainerHigh to colors.onSurfaceVariant
         }
+        CueKind.NEUTRAL -> colors.surfaceContainerHigh to colors.onSurfaceVariant
     }
-}
-
-@Composable
-private fun TranscriptPane(r: Recording, tr: Transcript, player: Player) {
-    val pos = player.positionMs / 1000.0
-    val listState = rememberLazyListState()
-    val cur = tr.segments.indexOfLast { it.start <= pos + 0.2 }
-    val deck = DeckTheme.colors
-    LaunchedEffect(cur) { if (cur >= 0) listState.animateScrollToItem(maxOf(0, cur - 1)) }
-    LazyColumn(
+    Text(
+        text = label,
         modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(max = 132.dp)
-            .padding(bottom = 8.dp, end = 4.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(deck.tapeWell)
-            .border(1.dp, deck.tapeGroove, RoundedCornerShape(8.dp))
-            .padding(6.dp),
-        state = listState,
-    ) {
-        items(tr.segments.size) { i ->
-            val seg = tr.segments[i]
-            val active = i == cur
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(if (active) MaterialTheme.colorScheme.surfaceContainerLowest else Color.Transparent)
-                    .clickable { player.seekTo((seg.start * 1000).toInt()) }
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    text = r.start.plusSeconds(seg.start.toLong()).format(MainActivity.T),
-                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                    color = if (active) deck.signalRed else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.width(62.dp).padding(top = 2.dp),
-                )
-                Text(
-                    text = seg.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-            }
+            .clip(CircleShape)
+            .background(bg)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        style = MaterialTheme.typography.labelSmall,
+        color = fg,
+        maxLines = 1,
+    )
+}
+
+@Composable
+private fun CenteredContextPill(text: String) {
+    Box(Modifier.fillMaxWidth().padding(vertical = 3.dp), contentAlignment = Alignment.Center) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.75f),
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.5.dp),
+            )
         }
     }
 }
 
 @Composable
-private fun TapeReelsGraphic(spinning: Boolean) {
-    val deg = if (spinning) {
-        val transition = rememberInfiniteTransition(label = "reels")
-        val anim by transition.animateFloat(
-            initialValue = 0f,
-            targetValue = 360f,
-            animationSpec = infiniteRepeatable(tween(4200, easing = LinearEasing), RepeatMode.Restart),
-            label = "reelAngle",
+private fun FeedEmptyState(
+    query: String,
+    filteredByLens: Boolean,
+    mode: WorkMode,
+    unconfigured: Boolean,
+    onOpenSettings: () -> Unit,
+) {
+    if (query.isNotEmpty() || filteredByLens) {
+        EmptyStateCard(
+            icon = Icons.Rounded.SearchOff,
+            title = "没有匹配的记忆片段",
+            body = "试试切换上方筛选胶囊，或换个关键词检索。",
         )
-        anim
     } else {
-        0f
-    }
-    val strokeColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val frameColor = DeckTheme.colors.tapeGroove
-    Canvas(Modifier.width(38.dp).height(20.dp)) {
-        val cr = 4.dp.toPx()
-        drawRoundRect(
-            color = frameColor.copy(alpha = 0.45f),
-            size = size,
-            cornerRadius = CornerRadius(cr, cr),
+        EmptyStateCard(
+            icon = Icons.AutoMirrored.Rounded.Notes,
+            title = "今天还没有对话记录",
+            body = if (mode == WorkMode.DIRECT_ASR) {
+                "开启右上角录音后，开口交谈会自动分段整理成清晰的记忆流。"
+            } else {
+                "录音加密上传后，电脑端整理完会自动同步到这里。"
+            },
+            actionLabel = if (unconfigured) "去配置${mode.label}" else null,
+            onAction = if (unconfigured) onOpenSettings else null,
         )
-        drawRoundRect(
-            color = strokeColor.copy(alpha = 0.32f),
-            size = size,
-            cornerRadius = CornerRadius(cr, cr),
-            style = Stroke(width = 1.dp.toPx()),
-        )
-        val r = 5.5.dp.toPx()
-        val cy = size.height / 2f
-        val c1 = Offset(9.5.dp.toPx(), cy)
-        val c2 = Offset(size.width - 9.5.dp.toPx(), cy)
-        drawLine(
-            color = strokeColor.copy(alpha = 0.5f),
-            start = Offset(c1.x, cy - r),
-            end = Offset(c2.x, cy - r),
-            strokeWidth = 1.dp.toPx(),
-        )
-        for (c in listOf(c1, c2)) {
-            drawCircle(color = strokeColor, radius = r, center = c, style = Stroke(width = 1.2.dp.toPx()))
-            drawCircle(color = strokeColor, radius = 1.6.dp.toPx(), center = c)
-            rotate(degrees = deg, pivot = c) {
-                for (spoke in listOf(0f, 120f, 240f)) {
-                    rotate(degrees = spoke, pivot = c) {
-                        drawLine(
-                            color = strokeColor,
-                            start = Offset(c.x, c.y - 2.dp.toPx()),
-                            end = Offset(c.x, c.y - r + 0.8.dp.toPx()),
-                            strokeWidth = 1.1.dp.toPx(),
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2968,13 +3575,11 @@ private fun StatusDot(color: Color, breathing: Boolean) {
         val pulse by rememberInfiniteTransition(label = "dotPulse").animateFloat(
             initialValue = 0.35f,
             targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+            animationSpec = infiniteRepeatable(tween(950), RepeatMode.Reverse),
             label = "dotAlpha",
         )
         pulse
-    } else {
-        1f
-    }
+    } else 1f
     Box(
         Modifier
             .size(7.dp)
@@ -2984,74 +3589,13 @@ private fun StatusDot(color: Color, breathing: Boolean) {
 }
 
 @Composable
-private fun MetaTag(icon: ImageVector, text: String, color: Color, onClick: (() -> Unit)? = null) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
-            .padding(vertical = 1.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp), tint = color)
-        Spacer(Modifier.width(3.dp))
-        Text(text, style = MaterialTheme.typography.labelMedium, color = color, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-private fun ProximityBadge(label: String, proximity: String?) {
-    val deck = DeckTheme.colors
-    val colors = MaterialTheme.colorScheme
-    val (bg, fg) = when (proximity) {
-        Proximity.NEAR -> deck.ledGreen.copy(alpha = 0.13f) to deck.ledGreen
-        Proximity.MEDIA -> deck.ledAmber.copy(alpha = 0.15f) to deck.ledAmber
-        else -> colors.surfaceContainerHigh to colors.onSurfaceVariant
-    }
-    Text(
-        text = label,
-        modifier = Modifier
-            .clip(RoundedCornerShape(5.dp))
-            .background(bg)
-            .padding(horizontal = 6.dp, vertical = 1.5.dp),
-        style = MaterialTheme.typography.labelSmall,
-        color = fg,
-        maxLines = 1,
-    )
-}
-
-@Composable
-private fun MoodBadge(mood: String, score: Float, vocalTag: String? = null) {
-    val deck = DeckTheme.colors
-    val colors = MaterialTheme.colorScheme
-    val (bg, fg) = when (mood) {
-        "positive" -> deck.ledGreen.copy(alpha = 0.14f) to deck.ledGreen
-        "negative" -> deck.ledAmber.copy(alpha = 0.16f) to deck.ledAmber
-        else -> colors.surfaceContainerHigh to colors.onSurfaceVariant
-    }
-    val text = buildString {
-        append(moodCnLabel(mood)).append(' ').append(formatMoodScore(score))
-        if (!vocalTag.isNullOrBlank()) append(" · ").append(vocalTag)
-    }
-    Text(
-        text = text,
-        modifier = Modifier
-            .clip(RoundedCornerShape(5.dp))
-            .background(bg)
-            .padding(horizontal = 6.dp, vertical = 1.5.dp),
-        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-        color = fg,
-        maxLines = 1,
-    )
-}
-
-@Composable
 private fun StatusPill(text: String) {
     Text(
         text = text,
         modifier = Modifier
-            .clip(RoundedCornerShape(5.dp))
+            .clip(CircleShape)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-            .padding(horizontal = 6.dp, vertical = 2.dp),
+            .padding(horizontal = 8.dp, vertical = 2.dp),
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -3061,7 +3605,7 @@ private fun StatusPill(text: String) {
 private fun PageList(content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 28.dp),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 112.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         content = content,
     )
@@ -3080,13 +3624,13 @@ private fun SectionCard(
         label = "cardFill",
     )
     val borderColor by animateColorAsState(
-        if (highlight) DeckTheme.colors.signalRed.copy(alpha = 0.6f) else colors.outlineVariant,
+        if (highlight) DeckTheme.colors.accentBlue.copy(alpha = 0.55f) else colors.outlineVariant,
         tween(180),
         label = "cardBorder",
     )
     val cardColors = CardDefaults.outlinedCardColors(containerColor = fill)
     val border = BorderStroke(1.dp, borderColor)
-    val body: @Composable ColumnScope.() -> Unit = { Column(Modifier.padding(14.dp), content = content) }
+    val body: @Composable ColumnScope.() -> Unit = { Column(Modifier.padding(16.dp), content = content) }
     if (onClick != null) {
         OutlinedCard(
             onClick = onClick,
@@ -3156,9 +3700,8 @@ private fun EmptyStateCard(
             Box(
                 modifier = Modifier
                     .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(DeckTheme.colors.tapeWell)
-                    .border(1.dp, DeckTheme.colors.tapeGroove, RoundedCornerShape(12.dp)),
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainer),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -3171,7 +3714,7 @@ private fun EmptyStateCard(
                 Spacer(Modifier.height(14.dp))
                 FilledTonalButton(
                     onClick = onAction,
-                    shape = RoundedCornerShape(10.dp),
+                    shape = CircleShape,
                     modifier = Modifier.pressScale(),
                 ) { Text(actionLabel) }
             }
@@ -3181,7 +3724,7 @@ private fun EmptyStateCard(
 
 @Composable
 private fun Avatar(text: String, bg: Color, fg: Color) {
-    Box(Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).background(bg), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(42.dp).clip(CircleShape).background(bg), contentAlignment = Alignment.Center) {
         Text(text, color = fg, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
     }
 }
@@ -3190,17 +3733,78 @@ private fun Avatar(text: String, bg: Color, fg: Color) {
 private fun ActionChip(icon: ImageVector, label: String, onClick: () -> Unit) {
     AssistChip(
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
+        shape = CircleShape,
         label = { Text(label) },
         leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(AssistChipDefaults.IconSize)) },
     )
+}
+
+private fun buildHighlightedText(
+    text: String,
+    query: String,
+    bg: Color,
+    fg: Color,
+): AnnotatedString {
+    if (query.isBlank()) return AnnotatedString(text)
+    val lower = text.lowercase()
+    return buildAnnotatedString {
+        var idx = 0
+        while (idx < text.length) {
+            val hit = lower.indexOf(query, idx)
+            if (hit < 0) {
+                append(text.substring(idx))
+                break
+            }
+            if (hit > idx) append(text.substring(idx, hit))
+            withStyle(SpanStyle(background = bg, color = fg, fontWeight = FontWeight.SemiBold)) {
+                append(text.substring(hit, hit + query.length))
+            }
+            idx = hit + query.length
+        }
+    }
+}
+
+@Composable
+private fun highlightMatches(text: String, query: String): AnnotatedString {
+    if (query.isBlank()) return AnnotatedString(text)
+    val deck = DeckTheme.colors
+    return remember(text, query, deck.signalRedContainer, deck.onSignalRedContainer) {
+        buildHighlightedText(text, query, deck.signalRedContainer, deck.onSignalRedContainer)
+    }
+}
+
+private fun isSelfDisplayName(name: String?): Boolean {
+    val clean = name?.trim()?.lowercase() ?: return false
+    return clean == "我" || clean == "本人" || clean == "自己" || clean == "me"
+}
+
+private fun humanVoiceCue(proximity: String?, avgDb: Float?): String? = when (proximity) {
+    Proximity.FAR -> "远场"
+    Proximity.MEDIA -> "外放"
+    else -> when {
+        avgDb == null -> null
+        avgDb <= -38.0f -> "轻声"
+        avgDb >= -20.5f -> "声音洪亮"
+        else -> null
+    }
+}
+
+private fun humanAffectCue(mood: String?, moodScore: Float?, vocalTags: List<String>): String? {
+    val firstTag = vocalTags.firstOrNull { it.isNotBlank() }
+    return when {
+        firstTag != null && mood == "positive" -> if (firstTag == "笑声") "愉悦 · 笑声" else "愉悦 · $firstTag"
+        firstTag != null -> firstTag
+        mood == "positive" && (moodScore == null || moodScore >= 0.35f) -> "愉悦"
+        mood == "negative" && (moodScore == null || moodScore <= -0.35f) -> "语气急促"
+        else -> null
+    }
 }
 
 private fun workerShortLabel(remote: RemoteStatus): String = when {
     !remote.workerOnline -> remote.workerAgeSec?.let { "电脑离线 ${fmtAge(it)}" } ?: "等待电脑端连接"
     remote.workerPhase == "paused" -> "已暂停拉取"
     remote.asrOk == false || remote.workerPhase == "asr_down" -> "转写服务未就绪"
-    remote.workerPhase == "transcribing" -> "正在转写 (${remote.workerPhaseElapsedSec.toInt()}s)"
+    remote.workerPhase == "transcribing" -> "正在整理 (${remote.workerPhaseElapsedSec.toInt()}s)"
     remote.workerPhase == "error" -> "出错：${remote.workerError ?: "未知"}"
     else -> remote.asrModel ?: "空闲就绪"
 }
@@ -3226,8 +3830,6 @@ private fun computeEnergyWeightedDb(lines: List<LineUi>): Float? {
     return ((raw * 10.0).roundToInt() / 10.0).toFloat()
 }
 
-private fun formatDb(db: Float): String = String.format(Locale.US, "%.1fdB", db)
-
 private fun computeDominantProximity(lines: List<LineUi>): String? {
     var nearS = 0.0
     var farS = 0.0
@@ -3248,21 +3850,6 @@ private fun computeDominantProximity(lines: List<LineUi>): String? {
         else -> Proximity.FAR
     }
 }
-
-private fun proximityCnBadge(proximity: String?, avgDb: Float?): String? = when (proximity) {
-    Proximity.FAR -> "远场"
-    Proximity.MEDIA -> "外放"
-    Proximity.NEAR -> if (avgDb != null && avgDb <= -38.0f) "近场低声" else null
-    else -> null
-}
-
-private fun moodCnLabel(mood: String): String = when (mood) {
-    "positive" -> "积极"
-    "negative" -> "消极"
-    else -> "中性"
-}
-
-private fun formatMoodScore(score: Float): String = String.format(Locale.US, "%+.2f", score)
 
 private fun computeWeightedMoodFromSegments(segs: List<Segment>): Pair<String, Float>? {
     var weighted = 0.0
@@ -3304,10 +3891,7 @@ private fun aggregateSceneTags(tagLists: List<List<SceneTag>>): List<SceneTag> {
         .map { SceneTag(it.key, it.value) }
 }
 
-private fun formatSceneTags(tags: List<SceneTag>): String? {
-    if (tags.isEmpty()) return null
-    return tags.joinToString(" · ") { t ->
-        String.format(Locale.US, "%s %.2f", t.label, t.score)
-    }
+private fun formatCleanSceneTags(tags: List<SceneTag>, excludeLaugh: Boolean): String? {
+    val labels = tags.map { it.label }.filterNot { excludeLaugh && it == "笑声" }.take(2)
+    return if (labels.isEmpty()) null else labels.joinToString(" · ")
 }
-

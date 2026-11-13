@@ -110,6 +110,7 @@ class UiWalkthroughTest {
             ),
         )
         Config.setMode(ctx, WorkMode.DIRECT_ASR)
+        Config.setFeedStyle(ctx, FeedStyle.DIALOGUE)
         // 触发 UI 立即重读新写入的模拟录音与转写记录
         AppState.update { it.copy(textVersion = it.textVersion + 1) }
     }
@@ -153,19 +154,23 @@ class UiWalkthroughTest {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
 
-        // 1. 待机态「文字」页（带多说话人对话卡片 + 近场低声徽标 + 远场背景自动折叠条）+ 验证品牌名为简洁的 Hark + 记录 Tab 纵坐标基线
+        // 1. 待机态模式 B「主客气泡流」：验证无分贝数字、例外标签「愉悦 · 笑声 / 轻声」、快筛胶囊、远场静默胶囊，以及底部毛玻璃胶囊栏基线
         rule.onNodeWithText("Hark").assertIsDisplayed()
-        rule.onNodeWithText("近场低声").assertIsDisplayed()
-        rule.onNodeWithText("已折叠 1 段远场背景声 · 点击展开").assertIsDisplayed()
-        val tabBoundsIdle = rule.onNodeWithText("文字").fetchSemanticsNode().boundsInRoot
-        captureAllWindows("01-events-idle")
+        rule.onNodeWithText("只看我说").assertIsDisplayed()
+        rule.onNodeWithText("愉悦 · 笑声").assertIsDisplayed()
+        rule.onNodeWithText("轻声").assertIsDisplayed()
+        rule.onNodeWithText("已静默 1 段邻桌远场声 · 展开").assertIsDisplayed()
+        rule.onAllNodesWithText("-19.6dB", substring = true).assertCountEquals(0)
+        rule.onAllNodesWithText("中性", substring = true).assertCountEquals(0)
+        val dockBoundsIdle = rule.onNodeWithText("人物").fetchSemanticsNode().boundsInRoot
+        captureAllWindows("01-mode-b-dialogue-idle")
 
-        // 2. 切换到「走带录音中」状态，推进 120Hz 帧时钟生成平滑声波条，验证下方 TabRow 纵坐标 0 像素跳动！
+        // 2. 切换到「正在录音」状态：右上角变为呼吸红点「记录中 · 86%」，无顶栏跳动、无冗余磁带横条
         AppState.update {
             it.copy(
                 link = LinkState.STREAMING,
                 deviceName = "Hark DT-1",
-                batteryMv = 4050,
+                batteryMv = 4070,
                 bytesPerSec = 2400,
                 totalPackets = 1200,
                 lostPackets = 1,
@@ -177,87 +182,80 @@ class UiWalkthroughTest {
                 liveSpeech = true,
             )
         }
-        // 先等待 AnimatedContent(160ms) 完成过渡使频谱组件上屏，再推进多帧渲染完整声波带
-        rule.mainClock.advanceTimeBy(220)
-        repeat(24) { step ->
-            val v = (0.28f + 0.54f * kotlin.math.abs(kotlin.math.sin(step * 0.65f)))
-            AppState.update { it.copy(lastWriteNanos = System.nanoTime(), liveLevel = v, liveSpeech = v > 0.45f) }
-            rule.mainClock.advanceTimeBy(110)
-        }
+        rule.mainClock.advanceTimeBy(300)
         rule.waitForIdle()
-        val tabBoundsStreaming = rule.onNodeWithText("文字").fetchSemanticsNode().boundsInRoot
-        assertEquals("切换录音状态时下方导航栏不允许上下跳动", tabBoundsIdle.top, tabBoundsStreaming.top, 2.0f)
-        captureAllWindows("02-events-streaming")
+        val dockBoundsStreaming = rule.onNodeWithText("人物").fetchSemanticsNode().boundsInRoot
+        assertEquals("切换录音状态时导航栏不允许上下跳动", dockBoundsIdle.top, dockBoundsStreaming.top, 2.0f)
+        captureAllWindows("02-mode-b-dialogue-streaming")
 
-        // 3. 点开顶部方角硬件状态铭牌 -> 验证顶栏锚定浮层直接完整弹出，「停止录音」位于屏幕中上方绝不被底部裁切！
+        // 3. 点开右上角胶囊 -> 顶栏锚定设备状态浮层，「停止录音」位于上半区绝不裁切
         rule.onNodeWithContentDescription("打开设备状态").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("设备状态").assertIsDisplayed()
         rule.onNodeWithText("设备电量").assertIsDisplayed()
         val stopBounds = rule.onNodeWithText("停止录音").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
         val screenH = rule.activity.window.decorView.height.coerceAtLeast(2000)
-        assertTrue("停止录音按钮必须位于屏幕上半区，杜绝任何底部裁切 ($stopBounds vs $screenH)", stopBounds.bottom < screenH * 0.68f)
+        assertTrue("停止录音按钮必须位于屏幕上半区 ($stopBounds vs $screenH)", stopBounds.bottom < screenH * 0.68f)
         captureAllWindows("03-telemetry-sheet")
 
-        // 从状态浮层点「设置」进入独立设置页，展开 3 步新手引导核对视觉
-        rule.onNodeWithText("设置").performClick()
+        // 从设备状态浮层点开「原始录音归档」验证切片波形与状态展示，随后返回
+        rule.onNodeWithText("查看切片与波形 ›").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("转写路径").assertIsDisplayed()
-        rule.onNodeWithText("直连转写服务").assertIsDisplayed()
-        rule.onNodeWithText("配置指引").performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("豆包语音 3 步配置").assertIsDisplayed()
-        rule.onNodeWithText("测试并启用").assertIsDisplayed()
-        captureAllWindows("04-settings-direct-asr")
-
-        // 切换到 OpenAI 兼容查看一键平台预设（硅基流动 / Groq），再切回豆包语音
-        rule.onNodeWithText("OpenAI 兼容").performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("硅基流动").assertIsDisplayed()
-        captureAllWindows("04b-settings-openai-presets")
-        rule.onNodeWithText("豆包语音").performClick()
-        rule.waitForIdle()
-
-        // 在设置页切换到未配置的「云端信箱同步」：验证后台实际模式仍保持 DIRECT_ASR，按钮变为「保存并启用」
-        val ctx = ApplicationProvider.getApplicationContext<Context>()
-        rule.onNodeWithText("云端信箱同步").performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("云端盲信箱与端到端密钥").assertIsDisplayed()
-        rule.onNodeWithText("保存并启用").assertIsDisplayed()
-        assertEquals(WorkMode.DIRECT_ASR, Config.mode(ctx))
-        captureAllWindows("05-settings-cloud")
-
-        // 返回主工作台，切到「录音」页，再进一次设置并返回，验证仍停留在「录音」页（状态不丢失）
+        rule.onNodeWithText("原始录音归档").assertIsDisplayed()
+        rule.onNodeWithText("16:40:00 – 16:40:03").assertIsDisplayed()
+        captureAllWindows("04-raw-recordings")
         rule.onNodeWithContentDescription("返回").performClick()
         rule.waitForIdle()
 
-        rule.onNodeWithText("录音").performClick()
-        rule.waitForIdle()
+        // 4. 进入设置页：验证新增的「记忆流视图」双模式切换卡，切换为模式 C「无框左轴流」
         rule.onNodeWithContentDescription("设置").performClick()
         rule.waitForIdle()
+        rule.onNodeWithText("记忆流视图").assertIsDisplayed()
+        rule.onNodeWithText("主客气泡流").assertIsDisplayed()
+        rule.onNodeWithText("无框左轴流").performClick()
+        rule.waitForIdle()
+
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        assertEquals(FeedStyle.EDITORIAL, Config.feedStyle(ctx))
+        captureAllWindows("05-settings-feed-style")
+
+        // 在设置页顺带验证切换到未配置的「云端信箱同步」不会破坏当前 DIRECT_ASR
+        rule.onNodeWithText("云端信箱同步").performClick()
+        rule.waitForIdle()
+        assertEquals(WorkMode.DIRECT_ASR, Config.mode(ctx))
+
+        // 5. 返回主工作台：验证立即生效为模式 C「今日脉络（无框左轴流）」，长对话默认摘要预览、点按原位展开逐字稿
         rule.onNodeWithContentDescription("返回").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("16:40:00 – 16:40:03").assertIsDisplayed()
-        captureAllWindows("06-recordings-tape")
+        rule.onAllNodesWithText("今日脉络").onFirst().assertIsDisplayed()
+        rule.onNodeWithText("有效开口").assertIsDisplayed()
+        rule.onNodeWithText("与 张工 的对话").assertIsDisplayed()
+        captureAllWindows("06-mode-c-editorial-collapsed")
 
+        rule.onNodeWithText("展开全篇 2 段 · 已静默 1 段背景声").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("收起逐字稿").assertIsDisplayed()
+        captureAllWindows("06b-mode-c-editorial-expanded")
+
+        // 6. 底部悬浮毛玻璃胶囊切换「人物」与「足迹」
         rule.onNodeWithText("人物").performClick()
         rule.waitForIdle()
+        rule.onNodeWithText("佩戴者").assertIsDisplayed()
         captureAllWindows("07-people-roster")
 
-        rule.onNodeWithText("地点").performClick()
+        rule.onNodeWithText("足迹").performClick()
         rule.waitForIdle()
-        captureAllWindows("09-places")
+        captureAllWindows("08-places")
 
-        // 测试全局即时搜索交互（先刷新音频写入时间戳避免走带进入等待流态，再命中高亮词条“外壳”）
-        AppState.update { it.copy(lastWriteNanos = System.nanoTime(), liveLevel = 0.52f) }
-        rule.onNodeWithText("文字").performClick()
+        // 7. 切回记忆流，点右下独立毛玻璃搜索圆钮测试实时检索
+        rule.onAllNodesWithText("今日脉络").onLast().performClick()
+        rule.waitForIdle()
         rule.onNodeWithContentDescription("搜索记录").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("搜索对话文字、人物或地点…").performTextInput("外壳")
-        AppState.update { it.copy(lastWriteNanos = System.nanoTime(), liveLevel = 0.52f) }
         rule.mainClock.advanceTimeBy(120)
         rule.waitForIdle()
-        rule.onNodeWithText("张工").assertIsDisplayed()
-        captureAllWindows("08-search-filtered")
+        rule.onAllNodesWithText("张工").onFirst().assertIsDisplayed()
+        captureAllWindows("09-search-filtered")
     }
 }

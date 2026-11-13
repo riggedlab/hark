@@ -76,7 +76,9 @@ internal fun SettingsScreen(
     whitelisted: Boolean,
     hasLocation: Boolean,
     unuploadedCount: Int,
+    recordingCount: Int,
     onBack: () -> Unit,
+    onOpenRawRecordings: () -> Unit,
     onConfigChanged: () -> Unit,
     onRepairBle: () -> Unit,
     onRequestBatteryWhitelist: () -> Unit,
@@ -92,6 +94,7 @@ internal fun SettingsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    var feedStyle by remember { mutableStateOf(Config.feedStyle(ctx)) }
     var committedMode by remember { mutableStateOf(Config.mode(ctx)) }
     var selectedMode by remember { mutableStateOf(committedMode) }
 
@@ -190,6 +193,38 @@ internal fun SettingsScreen(
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            // 0. 记忆流视图风格切换（主客气泡流 B / 无框左轴流 C）
+            item(key = "feed_style_selector") {
+                SettingsGroupCard(
+                    title = "记忆流视图",
+                    subtitle = "选择全天对话与环境脉络的呈现方式，切换立即生效",
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        FeedStyle.entries.forEach { style ->
+                            ModeOptionTile(
+                                title = style.label,
+                                desc = style.desc,
+                                selected = feedStyle == style,
+                                active = feedStyle == style,
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    if (feedStyle != style) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        Config.setFeedStyle(ctx, style)
+                                        feedStyle = style
+                                        onConfigChanged()
+                                        notify("已切换为「${style.label}」")
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             // 1. 清晰双路径选择卡（一眼看懂区别 + 当前生效标记）
             item(key = "mode_selector") {
                 SettingsGroupCard(title = "转写路径", subtitle = "可随时切换；直连期间录音保留在本机，7 天内切回云端会自动加密补传") {
@@ -467,6 +502,25 @@ internal fun SettingsScreen(
                             }
                         },
                     )
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        colors = rowColors,
+                        leadingContent = { Icon(Icons.Rounded.GraphicEq, contentDescription = null) },
+                        headlineContent = { Text("原始录音归档") },
+                        supportingContent = {
+                            Text(
+                                text = "本机保存 $recordingCount 段音频切片 · 查看转写状态或回放原声",
+                                style = MaterialTheme.typography.bodySmall.merge(TabularMono),
+                            )
+                        },
+                        trailingContent = {
+                            OutlinedButton(
+                                onClick = onOpenRawRecordings,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.pressScale(),
+                            ) { Text("查看") }
+                        },
+                    )
                 }
             }
 
@@ -545,7 +599,7 @@ private fun ModeOptionTile(
     Surface(
         onClick = onClick,
         modifier = modifier.pressScale(),
-        shape = RoundedCornerShape(10.dp),
+        shape = MaterialTheme.shapes.small,
         color = bgColor,
         border = BorderStroke(if (selected) 1.5.dp else 1.dp, borderColor),
     ) {

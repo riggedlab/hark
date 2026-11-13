@@ -11,6 +11,15 @@ enum class WorkMode(val id: String, val label: String) {
     }
 }
 
+enum class FeedStyle(val id: String, val label: String, val desc: String) {
+    DIALOGUE("dialogue", "主客气泡流", "我说靠右、对方靠左，点气泡原位回放"),
+    EDITORIAL("editorial", "无框左轴流", "纯白左轴时间线，长对话先预览再展开");
+
+    companion object {
+        fun fromId(id: String?): FeedStyle = entries.firstOrNull { it.id == id } ?: DIALOGUE
+    }
+}
+
 enum class AsrProvider(
     val id: String,
     val label: String,
@@ -165,6 +174,17 @@ data class Config(val serverUrl: String, val token: String, val e2eeKey: ByteArr
                     AppState.updateRemote { RemoteStatus() }
                 }
             }
+        }
+
+        fun feedStyle(ctx: Context): FeedStyle {
+            val p = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
+            return FeedStyle.fromId(p.getString("feed_style", null))
+        }
+
+        fun setFeedStyle(ctx: Context, style: FeedStyle) {
+            ctx.getSharedPreferences("config", Context.MODE_PRIVATE).edit()
+                .putString("feed_style", style.id)
+                .apply()
         }
 
         fun rawValues(ctx: Context): Triple<String, String, String> {

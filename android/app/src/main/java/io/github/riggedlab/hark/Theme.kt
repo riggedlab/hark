@@ -34,14 +34,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 精密磁带录音机语义扩展色（Braun / TP-7 克制机械风）：
- * 组件一律读取语义 token，绝不在业务代码散写硬编码色值。
+ * 日常记忆流语义扩展色（Apple HIG 温润极简风格）：
+ * 组件只读取语义 token，深浅色自动联动，绝不在业务代码散写裸色值。
  */
 @Immutable
 data class DeckColors(
     val signalRed: Color,
     val signalRedContainer: Color,
     val onSignalRedContainer: Color,
+    val accentBlue: Color,
+    val accentBlueContainer: Color,
+    val selfBubble: Color,
+    val onSelfBubble: Color,
+    val paperCanvas: Color,
+    val glassSurface: Color,
     val ledGreen: Color,
     val ledAmber: Color,
     val place: Color,
@@ -51,27 +57,39 @@ data class DeckColors(
 )
 
 private val LightDeckColors = DeckColors(
-    signalRed = Color(0xFFD64527),
-    signalRedContainer = Color(0xFFFBE7E2),
-    onSignalRedContainer = Color(0xFF5E1608),
-    ledGreen = Color(0xFF248257),
-    ledAmber = Color(0xFFC47A1B),
-    place = Color(0xFF9A6122),
-    placeContainer = Color(0xFFF3E6D6),
-    tapeWell = Color(0xFFECE9E1),
-    tapeGroove = Color(0xFFDCD8CE),
+    signalRed = Color(0xFFFF3B30),
+    signalRedContainer = Color(0xFFFFE9E7),
+    onSignalRedContainer = Color(0xFF69110B),
+    accentBlue = Color(0xFF0071E3),
+    accentBlueContainer = Color(0xFFE5F1FF),
+    selfBubble = Color(0xFFE8F2FF),
+    onSelfBubble = Color(0xFF132238),
+    paperCanvas = Color(0xFFFBFBFD),
+    glassSurface = Color(0xEBFFFFFF),
+    ledGreen = Color(0xFF248A3D),
+    ledAmber = Color(0xFFB26512),
+    place = Color(0xFF1B7278),
+    placeContainer = Color(0xFFE3F2F3),
+    tapeWell = Color(0xFFF0F0F4),
+    tapeGroove = Color(0xFFE2E2E8),
 )
 
 private val DarkDeckColors = DeckColors(
-    signalRed = Color(0xFFFF6647),
-    signalRedContainer = Color(0xFF4A1D14),
-    onSignalRedContainer = Color(0xFFFFDAD2),
-    ledGreen = Color(0xFF4CC38A),
-    ledAmber = Color(0xFFF0A944),
-    place = Color(0xFFE3AA6B),
-    placeContainer = Color(0xFF3B2B1A),
-    tapeWell = Color(0xFF212429),
-    tapeGroove = Color(0xFF30343C),
+    signalRed = Color(0xFFFF5B52),
+    signalRedContainer = Color(0xFF491916),
+    onSignalRedContainer = Color(0xFFFFDAD6),
+    accentBlue = Color(0xFF4DA3FF),
+    accentBlueContainer = Color(0xFF17314F),
+    selfBubble = Color(0xFF1B2B44),
+    onSelfBubble = Color(0xFFEAF2FF),
+    paperCanvas = Color(0xFF141519),
+    glassSurface = Color(0xDE1E2026),
+    ledGreen = Color(0xFF4EC968),
+    ledAmber = Color(0xFFF0A444),
+    place = Color(0xFF5AC4CC),
+    placeContainer = Color(0xFF173639),
+    tapeWell = Color(0xFF1F2127),
+    tapeGroove = Color(0xFF2C2F37),
 )
 
 val LocalDeckColors = staticCompositionLocalOf { LightDeckColors }
@@ -83,81 +101,81 @@ object DeckTheme {
         get() = LocalDeckColors.current
 }
 
-// 阳极氧化暖铝灰底 + 石墨黑主控 + 国际信号朱砂红走带针；青绿给声纹人物，黄铜赭石给地点
 private val Light = lightColorScheme(
-    primary = Color(0xFF202226),
-    onPrimary = Color(0xFFFAF9F6),
-    primaryContainer = Color(0xFFE5E2DA),
-    onPrimaryContainer = Color(0xFF17181B),
-    secondary = Color(0xFF5A5D64),
+    primary = Color(0xFF1D1D1F),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFE8F2FF),
+    onPrimaryContainer = Color(0xFF00346B),
+    secondary = Color(0xFF6E6E73),
     onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFE8E5DD),
-    onSecondaryContainer = Color(0xFF1C1E22),
-    tertiary = Color(0xFF1E6E62),
+    secondaryContainer = Color(0xFFEBEBF0),
+    onSecondaryContainer = Color(0xFF1D1D1F),
+    tertiary = Color(0xFF0071E3),
     onTertiary = Color(0xFFFFFFFF),
-    tertiaryContainer = Color(0xFFD7ECE8),
-    onTertiaryContainer = Color(0xFF0A3730),
-    error = Color(0xFFC93B2B),
-    errorContainer = Color(0xFFFCE6E3),
-    onErrorContainer = Color(0xFF5A120A),
-    background = Color(0xFFF4F2ED),
-    onBackground = Color(0xFF1A1B1E),
-    surface = Color(0xFFF4F2ED),
-    onSurface = Color(0xFF1A1B1E),
-    surfaceVariant = Color(0xFFEAE7DF),
-    onSurfaceVariant = Color(0xFF63666D),
-    surfaceContainerLowest = Color(0xFFFCFBF8),
-    surfaceContainerLow = Color(0xFFF7F5F0),
-    surfaceContainer = Color(0xFFECE9E1),
-    surfaceContainerHigh = Color(0xFFE3DFD6),
-    surfaceContainerHighest = Color(0xFFDAD5CA),
-    outline = Color(0xFF8C8F96),
-    outlineVariant = Color(0xFFDEDAD0),
+    tertiaryContainer = Color(0xFFE5F1FF),
+    onTertiaryContainer = Color(0xFF002D5E),
+    error = Color(0xFFD93829),
+    errorContainer = Color(0xFFFFE9E7),
+    onErrorContainer = Color(0xFF5C100A),
+    background = Color(0xFFF5F5F7),
+    onBackground = Color(0xFF1D1D1F),
+    surface = Color(0xFFF5F5F7),
+    onSurface = Color(0xFF1D1D1F),
+    surfaceVariant = Color(0xFFEBEBF0),
+    onSurfaceVariant = Color(0xFF6E6E73),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF9F9FB),
+    surfaceContainer = Color(0xFFEFEFF4),
+    surfaceContainerHigh = Color(0xFFE5E5EA),
+    surfaceContainerHighest = Color(0xFFDADAE0),
+    outline = Color(0xFF8E8E93),
+    outlineVariant = Color(0xFFE4E4E9),
 )
 
-// 深色模式采用哑光阳极石墨灰，禁用刺眼纯黑 #000000
+// 深色模式采用柔和深空石板灰，禁用纯黑 #000000
 private val Dark = darkColorScheme(
-    primary = Color(0xFFECEAE4),
-    onPrimary = Color(0xFF16181B),
-    primaryContainer = Color(0xFF2D3138),
-    onPrimaryContainer = Color(0xFFF2F0EA),
-    secondary = Color(0xFFBFC2C9),
-    onSecondary = Color(0xFF25272C),
-    secondaryContainer = Color(0xFF2A2D33),
-    onSecondaryContainer = Color(0xFFE4E5E9),
-    tertiary = Color(0xFF74C9BC),
-    onTertiary = Color(0xFF083730),
-    tertiaryContainer = Color(0xFF15473F),
-    onTertiaryContainer = Color(0xFFD6F2ED),
-    error = Color(0xFFFF6B5B),
-    errorContainer = Color(0xFF4A1914),
-    onErrorContainer = Color(0xFFFFDAD5),
-    background = Color(0xFF131416),
-    onBackground = Color(0xFFE8E7E3),
-    surface = Color(0xFF131416),
-    onSurface = Color(0xFFE8E7E3),
-    surfaceVariant = Color(0xFF26292E),
-    onSurfaceVariant = Color(0xFF9EA1A8),
-    surfaceContainerLowest = Color(0xFF1A1C1F),
-    surfaceContainerLow = Color(0xFF1D2024),
-    surfaceContainer = Color(0xFF212429),
-    surfaceContainerHigh = Color(0xFF292D33),
-    surfaceContainerHighest = Color(0xFF32373E),
-    outline = Color(0xFF777B84),
-    outlineVariant = Color(0xFF2B2F36),
+    primary = Color(0xFFF2F2F6),
+    onPrimary = Color(0xFF151619),
+    primaryContainer = Color(0xFF1E324C),
+    onPrimaryContainer = Color(0xFFDCEBFF),
+    secondary = Color(0xFF9D9DA6),
+    onSecondary = Color(0xFF1F2024),
+    secondaryContainer = Color(0xFF26282F),
+    onSecondaryContainer = Color(0xFFE6E6EC),
+    tertiary = Color(0xFF5AA9FF),
+    onTertiary = Color(0xFF002E5F),
+    tertiaryContainer = Color(0xFF173353),
+    onTertiaryContainer = Color(0xFFD9ECFF),
+    error = Color(0xFFFF6961),
+    errorContainer = Color(0xFF4A1916),
+    onErrorContainer = Color(0xFFFFDAD6),
+    background = Color(0xFF101114),
+    onBackground = Color(0xFFF2F2F6),
+    surface = Color(0xFF101114),
+    onSurface = Color(0xFFF2F2F6),
+    surfaceVariant = Color(0xFF23252B),
+    onSurfaceVariant = Color(0xFF9D9DA6),
+    surfaceContainerLowest = Color(0xFF1B1C21),
+    surfaceContainerLow = Color(0xFF17181D),
+    surfaceContainer = Color(0xFF202228),
+    surfaceContainerHigh = Color(0xFF282A32),
+    surfaceContainerHighest = Color(0xFF32353E),
+    outline = Color(0xFF767680),
+    outlineVariant = Color(0xFF292B33),
 )
 
-/** 等宽走带计数与时间码字体特性（防止跳秒引起整行抖动） */
+/** 等宽数字特性（时间码与时长防跳） */
 val TabularMono = TextStyle(
-    fontFamily = FontFamily.Monospace,
+    fontFamily = FontFamily.SansSerif,
     fontFeatureSettings = "tnum",
 )
 
 private val AppTypography = Typography(
-    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.2).sp),
-    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
+    headlineSmall = TextStyle(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp),
+    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.3).sp),
+    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.1).sp),
     titleSmall = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.SemiBold),
-    bodyLarge = TextStyle(fontSize = 15.5.sp, lineHeight = 25.sp, fontWeight = FontWeight.Normal),
+    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 23.sp, fontWeight = FontWeight.Normal),
     bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Normal),
     bodySmall = TextStyle(fontSize = 12.5.sp, lineHeight = 18.sp, fontWeight = FontWeight.Normal),
     labelLarge = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.Medium),
@@ -175,12 +193,12 @@ fun DitingTheme(
         MaterialTheme(
             colorScheme = if (darkTheme) Dark else Light,
             typography = AppTypography,
-            // 同心圆角阶梯：外层卡片 medium=14dp，内嵌磁带视窗 small=8dp（r = R - p）
+            // 圆润同心圆角阶梯：外层卡片 medium=20dp，内层胶囊/嵌块 small=14dp
             shapes = Shapes(
-                extraSmall = RoundedCornerShape(6.dp),
-                small = RoundedCornerShape(8.dp),
-                medium = RoundedCornerShape(14.dp),
-                large = RoundedCornerShape(20.dp),
+                extraSmall = RoundedCornerShape(10.dp),
+                small = RoundedCornerShape(14.dp),
+                medium = RoundedCornerShape(20.dp),
+                large = RoundedCornerShape(26.dp),
             ),
             content = content,
         )
@@ -188,15 +206,14 @@ fun DitingTheme(
 }
 
 /**
- * 物理按键微缩放回弹：通过 Initial 通道监听按压，不消费手势、不阻塞滚动，
- * 仅在 GPU Draw 阶段更新 graphicsLayer，零重组、满帧 120Hz。
+ * 柔和微缩放回弹：仅在 GPU Draw 阶段更新 graphicsLayer，不拦截滚动，满帧 120Hz。
  */
-fun Modifier.pressScale(enabled: Boolean = true, pressedScale: Float = 0.965f): Modifier = composed {
+fun Modifier.pressScale(enabled: Boolean = true, pressedScale: Float = 0.97f): Modifier = composed {
     if (!enabled) return@composed this
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(
         targetValue = if (pressed) pressedScale else 1f,
-        animationSpec = spring(dampingRatio = 0.68f, stiffness = Spring.StiffnessMedium),
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
         label = "pressScale",
     )
     this
