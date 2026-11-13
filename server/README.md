@@ -33,3 +33,11 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o har
 # 拷到服务器直接运行
 DATA_DIR=/var/lib/hark-mailbox PHONE_TOKEN=... WORKER_TOKEN=... ./hark-mailbox
 ```
+
+## 迁移与备份
+
+信箱的序号和进度都记在数据目录里（Docker 部署时是 `mailbox-data` 卷，单文件部署时是 `DATA_DIR`）。
+
+- **迁移到新机器或新卷时，把整个数据目录原样搬过去**，包括 `state.json`。迁移前先停掉旧信箱。
+- **不要换一个空目录接着用**。客户端记着旧进度，换空目录后可能跳过新收到的前几条转写，导致漏同步。确实要从空目录重来时，先让电脑端把信箱里的数据处理完，再切换。
+- 信箱只是中转，不是存档：音频和文字密文过期后会自动删除。要长期保存的数据请在电脑端备份，见 [README 的「数据备份」](../README.md#数据备份)。
