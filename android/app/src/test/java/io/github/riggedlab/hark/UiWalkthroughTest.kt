@@ -78,8 +78,9 @@ class UiWalkthroughTest {
                 .put(
                     "segments",
                     JSONArray()
-                        .put(JSONObject().put("start", 1.2).put("end", 9.5).put("text", "所以感觉还是要先把手机直连和云端信箱两条路径做干净，出门在外直接手机出字，回家自动补传归档。").put("speaker", "spk_01").put("db", -19.6).put("mood", "positive").put("mood_score", 0.62).put("vocal_tag", "笑声"))
-                        .put(JSONObject().put("start", 10.4).put("end", 18.2).put("text", "好的没问题，那我们周五下午三点再过一遍超薄磁吸外壳的公差和电池仓倒角。").put("speaker", "spk_02").put("db", -29.8).put("mood", "neutral").put("mood_score", 0.05)),
+                        .put(JSONObject().put("start", 1.2).put("end", 9.5).put("text", "所以感觉还是要先把手机直连和云端信箱两条路径做干净，出门在外直接手机出字，回家自动补传归档。").put("speaker", "spk_01").put("db", -19.6).put("snr_db", 28.4).put("proximity", "near").put("mood", "positive").put("mood_score", 0.62).put("vocal_tag", "笑声"))
+                        .put(JSONObject().put("start", 10.4).put("end", 18.2).put("text", "好的没问题，那我们周五下午三点再过一遍超薄磁吸外壳的公差和电池仓倒角。").put("speaker", "spk_02").put("db", -29.8).put("snr_db", 19.2).put("proximity", "near").put("mood", "neutral").put("mood_score", 0.05))
+                        .put(JSONObject().put("start", 21.0).put("end", 25.5).put("text", "隔壁工位下周团建去哪儿吃火锅？").put("speaker", "other_2").put("db", -34.2).put("snr_db", 8.1).put("proximity", "far").put("mood", "neutral").put("mood_score", 0.02)),
                 ),
         )
         Transcripts.save(
@@ -95,7 +96,7 @@ class UiWalkthroughTest {
                 .put(
                     "segments",
                     JSONArray()
-                        .put(JSONObject().put("start", 0.5).put("end", 6.8).put("text", "备忘一下今晚把本地 hark timeline 查询和手机端磁带走带界面一起验收。").put("speaker", "other_1").put("db", -20.4).put("mood", "neutral").put("mood_score", 0.04)),
+                        .put(JSONObject().put("start", 0.5).put("end", 6.8).put("text", "备忘一下今晚把本地 hark timeline 查询和手机端磁带走带界面一起验收。").put("speaker", "other_1").put("db", -41.5).put("snr_db", 16.8).put("proximity", "near").put("mood", "neutral").put("mood_score", 0.04)),
                 ),
         )
 
@@ -152,8 +153,10 @@ class UiWalkthroughTest {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
 
-        // 1. 待机态「文字」页（带多说话人对话卡片）+ 验证品牌名为简洁的 Hark + 记录 Tab 纵坐标基线
+        // 1. 待机态「文字」页（带多说话人对话卡片 + 近场低声徽标 + 远场背景自动折叠条）+ 验证品牌名为简洁的 Hark + 记录 Tab 纵坐标基线
         rule.onNodeWithText("Hark").assertIsDisplayed()
+        rule.onNodeWithText("近场低声").assertIsDisplayed()
+        rule.onNodeWithText("已折叠 1 段远场背景声 · 点击展开").assertIsDisplayed()
         val tabBoundsIdle = rule.onNodeWithText("文字").fetchSemanticsNode().boundsInRoot
         captureAllWindows("01-events-idle")
 

@@ -18,7 +18,7 @@
 | blinky | 绿灯快闪（0.1 秒切换一次） | ✅ 已验证 |
 | mic-level | PDM 麦克风音量表，从串口输出 | ✅ 已验证（增益偏低，峰值约 -17 dBFS） |
 | ble-test | BLE 心率示例，设备名 "Hark DT-1" | ✅ 已验证，nRF Connect 能连上并收到数据 |
-| **recorder** | **录音固件**：PDM 16kHz → 80Hz 高通 + 自动增益（0~20dB，峰值限制 -1dBFS）→ Opus（定点、16kbps VBR、复杂度 1）→ BLE 通知 | ✅ 0 丢包，约 1.6KB/s，编码 4.7ms/帧 |
+| **recorder** | **录音固件**：PDM 16kHz → 80Hz 高通 + 固定 +12dB 增益（峰值限制 -1dBFS）→ Opus（定点、16kbps VBR、复杂度 1）→ BLE 通知 | ✅ 0 丢包，约 1.6KB/s，编码 4.7ms/帧 |
 
 ## 录音固件 BLE 协议
 - 服务 `5a1d0001-7e3c-4b8a-9f00-524947000000`

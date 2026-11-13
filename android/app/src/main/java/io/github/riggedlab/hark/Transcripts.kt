@@ -20,7 +20,9 @@ data class Segment(
     val text: String,
     val speaker: String? = null,
     val db: Float? = null,
+    val snrDb: Float? = null,
     val activeSec: Float? = null,
+    val proximity: String? = null,
     val mood: String? = null,
     val moodScore: Float? = null,
     val vocalTag: String? = null,
@@ -144,9 +146,13 @@ object Transcripts {
             val dbVal = if (s.has("db") && !s.isNull("db")) {
                 s.optDouble("db", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
             } else null
+            val snrVal = if (s.has("snr_db") && !s.isNull("snr_db")) {
+                s.optDouble("snr_db", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
+            } else null
             val actVal = if (s.has("act_s") && !s.isNull("act_s")) {
                 s.optDouble("act_s", Double.NaN).takeIf { !it.isNaN() && it > 0.0 }?.toFloat()
             } else null
+            val proxVal = s.optString("proximity").takeIf { it == "near" || it == "far" || it == "media" }
             val moodVal = s.optString("mood").takeIf { it.isNotBlank() }
             val moodScoreVal = if (s.has("mood_score") && !s.isNull("mood_score")) {
                 s.optDouble("mood_score", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
@@ -158,7 +164,9 @@ object Transcripts {
                 text = s.optString("text"),
                 speaker = s.optString("speaker").takeIf { it.isNotBlank() },
                 db = dbVal,
+                snrDb = snrVal,
                 activeSec = actVal,
+                proximity = proxVal,
                 mood = moodVal,
                 moodScore = moodScoreVal,
                 vocalTag = vocalVal,

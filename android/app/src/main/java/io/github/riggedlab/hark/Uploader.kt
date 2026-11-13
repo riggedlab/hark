@@ -15,16 +15,20 @@ class Uploader(private val ctx: Context) {
     private val chunkDir = RecorderService.chunkDir(ctx)
     private val markDir = File(ctx.filesDir, "uploaded").apply { mkdirs() }
     private val silentDir = File(ctx.filesDir, "novoice").apply { mkdirs() }
+    private val farDir = File(ctx.filesDir, "farvoice").apply { mkdirs() }
 
     fun isUploaded(f: File) = File(markDir, f.name).exists()
     /** 这段录音没有人声，不上传也不调云端 ASR（录音本身照常在手机上保留 7 天） */
     fun isSilent(f: File) = File(silentDir, f.name).exists()
+    /** 整段录音仅有远场背景杂谈或电子外放且不匹配本机核心声纹，跳过转写/上传（本地照常保留 7 天） */
+    fun isFarSkipped(f: File) = File(farDir, f.name).exists()
     fun isSkippedBadAudio(f: File) = (badFileFailures[f.name] ?: 0) >= MAX_BAD_FILE_ATTEMPTS
 
     /** 后台一次性枚举标记集合，避免列表渲染时逐卡片调用 File.exists() */
     data class MarkSnapshot(
         val uploaded: Set<String>,
         val silent: Set<String>,
+        val farSkipped: Set<String>,
         val badAudio: Set<String>,
         val unuploadedCount: Int,
     )
@@ -32,11 +36,12 @@ class Uploader(private val ctx: Context) {
     fun snapshotMarks(): MarkSnapshot {
         val up = (markDir.list() ?: emptyArray()).toHashSet()
         val sil = (silentDir.list() ?: emptyArray()).toHashSet()
+        val far = (farDir.list() ?: emptyArray()).toHashSet()
         val bad = badFileFailures.filterValues { it >= MAX_BAD_FILE_ATTEMPTS }.keys.toHashSet()
         val unuploaded = (chunkDir.list() ?: emptyArray()).count { name ->
-            name.endsWith(".opus") && name !in up && name !in sil
+            name.endsWith(".opus") && name !in up && name !in sil && name !in far
         }
-        return MarkSnapshot(uploaded = up, silent = sil, badAudio = bad, unuploadedCount = unuploaded)
+        return MarkSnapshot(uploaded = up, silent = sil, farSkipped = far, badAudio = bad, unuploadedCount = unuploaded)
     }
 
     /** 按当前工作模式处理待办片段，并异步触发与 ASR 解耦的本地环境音/心情扫描 */
@@ -65,11 +70,21 @@ class Uploader(private val ctx: Context) {
         var ok = 0
         for (f in pendingCloud()) {
             if (Config.mode(ctx) != WorkMode.CLOUD) break
-            val speech = Vad.speechSeconds(ctx, f)
-            if (speech != null && speech < Vad.MIN_SPEECH_S) {
-                File(silentDir, f.name).createNewFile()
-                Log.i(TAG, "${f.name} 没有人声，不上传")
-                continue
+            // 若已在手机直连模式下出过字，优先尊重已有文稿，避免切回云端补传时被重复拦截
+            if (Transcripts.get(ctx, f.name) == null) {
+                when (Vad.screenChunk(ctx, f)) {
+                    Proximity.ChunkGate.NO_VOICE -> {
+                        File(silentDir, f.name).createNewFile()
+                        Log.i(TAG, "${f.name} 没有人声，不上传")
+                        continue
+                    }
+                    Proximity.ChunkGate.FAR_OR_MEDIA -> {
+                        File(farDir, f.name).createNewFile()
+                        Log.i(TAG, "${f.name} 整段为远场/外放背景声，不上传")
+                        continue
+                    }
+                    Proximity.ChunkGate.KEEP -> Unit
+                }
             }
             if (upload(cfg, f)) {
                 File(markDir, f.name).createNewFile()
@@ -91,11 +106,18 @@ class Uploader(private val ctx: Context) {
             var ok = 0
             for (f in pendingLocalAsr()) {
                 if (Config.mode(ctx) != WorkMode.DIRECT_ASR) break
-                val speech = Vad.speechSeconds(ctx, f)
-                if (speech != null && speech < Vad.MIN_SPEECH_S) {
-                    File(silentDir, f.name).createNewFile()
-                    Log.i(TAG, "${f.name} 没有人声，跳过手机转写")
-                    continue
+                when (Vad.screenChunk(ctx, f)) {
+                    Proximity.ChunkGate.NO_VOICE -> {
+                        File(silentDir, f.name).createNewFile()
+                        Log.i(TAG, "${f.name} 没有人声，跳过手机转写")
+                        continue
+                    }
+                    Proximity.ChunkGate.FAR_OR_MEDIA -> {
+                        File(farDir, f.name).createNewFile()
+                        Log.i(TAG, "${f.name} 整段为远场/外放背景声，跳过手机转写")
+                        continue
+                    }
+                    Proximity.ChunkGate.KEEP -> Unit
                 }
                 AppState.update { it.copy(localAsrRunning = f.name) }
                 var abortBatch = false
@@ -140,17 +162,22 @@ class Uploader(private val ctx: Context) {
     private fun cleanupMarkers() {
         markDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
         silentDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
+        farDir.listFiles()?.forEach { if (!File(chunkDir, it.name).exists()) it.delete() }
+        File(ctx.filesDir, "vad_gate").listFiles()?.forEach {
+            val base = it.name.removeSuffix(".txt")
+            if (!File(chunkDir, base).exists()) it.delete()
+        }
         badFileFailures.keys.removeIf { !File(chunkDir, it).exists() }
     }
 
     private fun pendingCloud() =
         (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
-            .filter { !isUploaded(it) && !isSilent(it) }
+            .filter { !isUploaded(it) && !isSilent(it) && !isFarSkipped(it) }
             .sortedBy { it.name }
 
     private fun pendingLocalAsr() =
         (chunkDir.listFiles { f -> f.name.endsWith(".opus") } ?: emptyArray())
-            .filter { !isSilent(it) && (badFileFailures[it.name] ?: 0) < MAX_BAD_FILE_ATTEMPTS && Transcripts.get(ctx, it.name) == null }
+            .filter { !isSilent(it) && !isFarSkipped(it) && (badFileFailures[it.name] ?: 0) < MAX_BAD_FILE_ATTEMPTS && Transcripts.get(ctx, it.name) == null }
             .sortedBy { it.name }
 
     private fun upload(cfg: Config, f: File): Boolean = runCatching {

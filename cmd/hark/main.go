@@ -546,6 +546,16 @@ func writeTranscript(w io.Writer, d worker.TranscriptDetail, segments []worker.R
 		if seg.DB != nil {
 			meta += fmt.Sprintf(" | %.1fdB", *seg.DB)
 		}
+		switch seg.Proximity {
+		case "far":
+			meta += " · 远场"
+		case "media":
+			meta += " · 外放"
+		case "near":
+			if seg.DB != nil && *seg.DB < -38.0 {
+				meta += " · 近场低声"
+			}
+		}
 		if seg.Mood != "" && seg.MoodScore != nil {
 			meta += fmt.Sprintf(" | %s %+.2f", seg.Mood, *seg.MoodScore)
 		}

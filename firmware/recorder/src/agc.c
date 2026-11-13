@@ -1,31 +1,24 @@
 /*
- * 音频前处理：80Hz 高通滤波 + 自动增益控制（AGC）+ 峰值限制。
+ * 音频前处理：80Hz 高通滤波 + 固定线性增益（+12dB）+ 峰值限制防削波。
  *
  * - 高通：二阶巴特沃斯，去掉直流、走路震动、衣服摩擦、空调等低频轰鸣（人声基本在 100Hz 以上）。
- * - AGC：只在"像是有人在说话"的帧上调整增益（帧能量比噪声底高 12dB 以上），安静时保持不动，
- *        这样不会把底噪越放越大。变响时快速降增益，变轻时慢慢升（≤ 6dB/秒）。
- * - 峰值限制：放大后若峰值超过 -1dBFS，就立即把这一帧的增益压到刚好不削波；
- *        帧内从上一帧的增益线性过渡到新增益，避免咔哒声。
+ * - 固定增益：不再做 0~20dB 动态响度拉平，完整保留物理声压差（供手机端远近场判别，同时避免时变增益劣化声纹）。
+ * - 峰值限制：放大后若瞬时峰值超过 -1dBFS（如咳嗽、碰壳），当帧立即压到刚好不削波，之后按 50dB/s 平滑恢复到 +12dB，无咔哒声。
  */
 #include <math.h>
 #include <zephyr/sys/util.h>
 #include "agc.h"
 #include "app.h"
 
-#define HPF_HZ          80.0f
-#define TARGET_DBFS     (-28.0f)   /* 说话时希望达到的帧 RMS */
-#define GAIN_MIN_DB     0.0f
-#define GAIN_MAX_DB     20.0f
-#define GAIN_INIT_DB    12.0f      /* 以前固定 ×4 */
-#define RISE_DB_PER_FR  (6.0f * FRAME_MS / 1000.0f)   /* 升增益最快 6dB/秒 */
-#define FALL_DB_PER_FR  (3.0f)                       /* 降增益很快 */
-#define SPEECH_OVER_NF_DB 12.0f
-#define PEAK_LIMIT      (0.89f * 32767.0f)          /* -1dBFS */
-#define GATE_DB         8.0f       /* 比噪声底高这么多就当作"有声音"，比 AGC 的说话判断更宽松，宁可多发 */
+#define HPF_HZ            80.0f
+#define FIXED_GAIN_DB     12.0f                       /* 固定 ×4 线性放大，保留真实远近音量差 */
+#define RECOVER_DB_PER_FR (50.0f * FRAME_MS / 1000.0f)/* 限幅后每帧恢复 1dB（约 0.2 秒回到 +12dB） */
+#define PEAK_LIMIT        (0.89f * 32767.0f)          /* -1dBFS */
+#define GATE_DB           8.0f       /* 比噪声底高这么多就当作"有声音"，宁可多发不漏字 */
 
 static float b0, b1, b2, a1, a2;     /* 高通系数 */
 static float hx1, hx2, hy1, hy2;     /* 高通状态 */
-static float gain_db = GAIN_INIT_DB;
+static float gain_db = FIXED_GAIN_DB;
 static float gain_lin_prev;
 static float noise_db = -60.0f;
 static uint32_t limited;
@@ -44,7 +37,7 @@ void agc_init(void)
 	a1 = -2.0f * c / a0;
 	a2 = (1.0f - alpha) / a0;
 	hx1 = hx2 = hy1 = hy2 = 0;
-	gain_db = GAIN_INIT_DB;
+	gain_db = FIXED_GAIN_DB;
 	gain_lin_prev = powf(10.0f, gain_db / 20.0f);
 }
 
@@ -81,21 +74,16 @@ void agc_process(int16_t *pcm, int n)
 
 	voice = rms_db > noise_db + GATE_DB && rms_db > -80.0f;
 
-	/* 3. 只在说话帧上调整增益 */
-	if (rms_db > noise_db + SPEECH_OVER_NF_DB && rms_db > -75.0f) {
-		float want = CLAMP(TARGET_DBFS - rms_db, GAIN_MIN_DB, GAIN_MAX_DB);
-		if (want > gain_db) {
-			gain_db = MIN(want, gain_db + RISE_DB_PER_FR);
-		} else {
-			gain_db = MAX(want, gain_db - FALL_DB_PER_FR);
-		}
+	/* 3. 固定 +12dB 增益；若上一帧因瞬时大音量触发过限幅，平滑回升到 +12dB */
+	if (gain_db < FIXED_GAIN_DB) {
+		gain_db = MIN(FIXED_GAIN_DB, gain_db + RECOVER_DB_PER_FR);
 	}
 
 	/* 4. 峰值限制：这一帧放大后不能超过 -1dBFS */
 	float g = powf(10.0f, gain_db / 20.0f);
 	if (peak * g > PEAK_LIMIT) {
 		g = PEAK_LIMIT / peak;
-		gain_db = db(g);          /* 记住压低后的增益，之后再慢慢升回来 */
+		gain_db = db(g);          /* 记住压低后的增益，之后再平滑回到 +12dB */
 		limited++;
 	}
 

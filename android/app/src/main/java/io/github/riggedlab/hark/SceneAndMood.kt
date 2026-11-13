@@ -37,7 +37,8 @@ import kotlin.math.sqrt
  */
 internal object SceneAndMood {
     private const val TAG = "SceneAndMood"
-    const val SCHEMA_VERSION = 1
+    const val SCHEMA_VERSION = 2
+    private const val SCENE_SIDECAR_VERSION = 1
 
     const val CED_ASSET = "ced_tiny_audio_tagging_int8.onnx"
     const val BGE_ASSET = "bge_small_zh_v15_q8.onnx"
@@ -94,7 +95,7 @@ internal object SceneAndMood {
         if (!Crypto.audioName.matches(name) || tags.isEmpty()) return
         val arr = JSONArray()
         for (t in tags) arr.put(JSONObject().put("label", t.label).put("score", t.score.toDouble()))
-        val root = JSONObject().put("ver", SCHEMA_VERSION).put("scene_tags", arr)
+        val root = JSONObject().put("ver", SCENE_SIDECAR_VERSION).put("scene_tags", arr)
         Sync.writeFile(File(sceneDir(ctx), "$name.json"), root.toString())
         sceneMem[name] = tags
     }
@@ -161,14 +162,17 @@ internal object SceneAndMood {
             val name = opus.name
             val sidecarFile = File(sceneDir(ctx), "$name.json")
             val hasSidecar = sidecarFile.exists() &&
-                runCatching { JSONObject(sidecarFile.readText()).optInt("ver", 0) >= SCHEMA_VERSION }.getOrDefault(false)
+                runCatching { JSONObject(sidecarFile.readText()).optInt("ver", 0) >= SCENE_SIDECAR_VERSION }.getOrDefault(false)
 
             val trFile = File(Transcripts.dir(ctx), "$name.json")
             val trNeedsAudio = trFile.exists() && runCatching {
                 val r = JSONObject(trFile.readText())
                 r.optInt("sm_audio_ver", 0) < SCHEMA_VERSION ||
                     (r.optJSONArray("segments")?.let { segs ->
-                        (0 until segs.length()).any { idx -> !segs.getJSONObject(idx).has("db") }
+                        (0 until segs.length()).any { idx ->
+                            val s = segs.getJSONObject(idx)
+                            !s.has("db") || !s.has("proximity")
+                        }
                     } == true)
             }.getOrDefault(false)
 
@@ -182,21 +186,7 @@ internal object SceneAndMood {
             }
 
             if (trFile.exists()) {
-                val energies = Voiceprint.computeFrameEnergies16k(pcm)
                 val updated = Transcripts.computeAndCommit(ctx, name) { root ->
-                    val segArr = root.optJSONArray("segments")
-                    if (segArr != null && energies.isNotEmpty()) {
-                        for (i in 0 until segArr.length()) {
-                            val o = segArr.getJSONObject(i)
-                            if (!o.has("db") || o.isNull("db")) {
-                                val st = Voiceprint.computeActiveSpeechStats(energies, 0.02, o.optDouble("start"), o.optDouble("end"))
-                                if (st != null) {
-                                    o.put("db", st.first.toDouble())
-                                    o.put("act_s", st.second.toDouble())
-                                }
-                            }
-                        }
-                    }
                     enrichWithPcmAndTags(ctx, pcm, tags, root)
                     true
                 }
@@ -758,11 +748,39 @@ internal object SceneAndMood {
 
     private fun enrichSegmentsMoodInternal(ctx: Context, pcm16k: FloatArray?, root: JSONObject) {
         val segArr = root.optJSONArray("segments") ?: return
-        if (segArr.length() == 0) return
+        val nSegs = segArr.length()
+        if (nSegs == 0) return
+
+        val proxProfile = if (pcm16k != null && pcm16k.isNotEmpty()) Proximity.buildProfile(pcm16k) else null
+        val roster = if (proxProfile != null) runCatching { Speakers.all(ctx) }.getOrDefault(emptyMap()) else emptyMap()
+        val acoustics = arrayOfNulls<Proximity.SegmentAcoustic>(nSegs)
+        val starts = DoubleArray(nSegs)
+        val ends = DoubleArray(nSegs)
+        val spks = arrayOfNulls<String>(nSegs)
+
+        for (i in 0 until nSegs) {
+            val o = segArr.getJSONObject(i)
+            val st = o.optDouble("start", 0.0)
+            val ed = o.optDouble("end", 0.0)
+            starts[i] = st
+            ends[i] = ed
+            spks[i] = o.optString("speaker").takeIf { it.isNotBlank() }
+            if (proxProfile != null) {
+                val ac = proxProfile.measureSegment(st, ed)
+                if (ac != null) {
+                    acoustics[i] = ac
+                    o.put("db", (ac.activeDb * 10f).roundToInt() / 10.0)
+                    o.put("act_s", (ac.activeSec * 100f).roundToInt() / 100.0)
+                    o.put("snr_db", (ac.snrDb * 10f).roundToInt() / 10.0)
+                }
+            }
+        }
+        val (chunkMedHf, chunkP90Db) = Proximity.chunkReferenceStats(acoustics.toList())
+        val proximities = arrayOfNulls<String>(nSegs)
 
         // 统计各说话人本段内的平均分贝，用于判断单句相对音量突增/突降
         val spkDbLists = HashMap<String, MutableList<Float>>()
-        for (i in 0 until segArr.length()) {
+        for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
             val spk = o.optString("speaker").ifBlank { "_anon" }
             if (o.has("db") && !o.isNull("db")) {
@@ -772,7 +790,7 @@ internal object SceneAndMood {
         }
         val spkMeanDb = spkDbLists.mapValues { (_, v) -> v.average().toFloat() }
 
-        for (i in 0 until segArr.length()) {
+        for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
             val txt = o.optString("text").trim()
             if (txt.isEmpty()) continue
@@ -783,15 +801,16 @@ internal object SceneAndMood {
             var sighP = 0f
             var applauseP = 0f
             var coughP = 0f
+            var cProbs: FloatArray? = null
 
-            val st = o.optDouble("start", 0.0)
-            val ed = o.optDouble("end", 0.0)
+            val st = starts[i]
+            val ed = ends[i]
             if (pcm16k != null && ed - st >= 0.7) {
                 val padS = ((st - 0.15).coerceAtLeast(0.0) * SAMPLE_RATE).toInt().coerceIn(0, pcm16k.size)
                 val maxClipEnd = min(ed + 0.25, st + 5.0)
                 val padE = (maxClipEnd * SAMPLE_RATE).toInt().coerceIn(padS, pcm16k.size)
                 if (padE - padS >= SAMPLE_RATE / 2) {
-                    val cProbs = inferCedProbs(ctx, pcm16k, padS, padE)
+                    cProbs = inferCedProbs(ctx, pcm16k, padS, padE)
                     if (cProbs != null) {
                         laughP = maxProbOf(cProbs, LAUGH_INDICES)
                         sighP = maxProbOf(cProbs, SIGH_INDICES)
@@ -799,6 +818,16 @@ internal object SceneAndMood {
                         coughP = maxProbOf(cProbs, COUGH_INDICES)
                     }
                 }
+            }
+
+            acoustics[i]?.let { ac ->
+                proximities[i] = Proximity.classifySegment(
+                    acoustic = ac,
+                    chunkMedianHfLfDb = chunkMedHf,
+                    chunkP90Db = chunkP90Db,
+                    cedProbs = cProbs,
+                    isProtectedSpeaker = Proximity.isProtectedSpeakerId(spks[i], roster),
+                )
             }
 
             val actS = o.optDouble("act_s", ed - st).takeIf { it > 0.05 }?.toFloat()
@@ -824,6 +853,13 @@ internal object SceneAndMood {
                 o.put("vocal_tag", res.vocalTag)
             } else {
                 o.remove("vocal_tag")
+            }
+        }
+
+        if (proxProfile != null) {
+            Proximity.smoothShortSegments(starts, ends, spks, acoustics, proximities)
+            for (i in 0 until nSegs) {
+                proximities[i]?.let { segArr.getJSONObject(i).put("proximity", it) }
             }
         }
     }

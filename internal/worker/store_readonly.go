@@ -287,7 +287,10 @@ func scanTranscript(row interface{ Scan(...any) error }, spkMap map[string]Speak
 	}
 	d.Segments = make([]ResolvedSegment, 0, len(segs))
 	for _, seg := range segs {
-		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text, DB: seg.DB, ActiveS: seg.ActiveS, MoodScore: seg.MoodScore}
+		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text, DB: seg.DB, SnrDB: seg.SnrDB, ActiveS: seg.ActiveS, MoodScore: seg.MoodScore}
+		if seg.Proximity != nil {
+			rs.Proximity = *seg.Proximity
+		}
 		if seg.Mood != nil {
 			rs.Mood = *seg.Mood
 		}

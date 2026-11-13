@@ -498,20 +498,56 @@ internal object Voiceprint {
         }
         val pcm = runCatching { Vad.decode16k(opusFile) }.getOrNull() ?: return finishEnrich(root)
 
-        val energies = computeFrameEnergies16k(pcm)
+        val proxProfile = Proximity.buildProfile(pcm)
+        val roster = runCatching { Speakers.all(ctx) }.getOrDefault(emptyMap())
+        val nSegs = segArr.length()
+        val segDbs = arrayOfNulls<Float>(nSegs)
+        val segAcoustics = arrayOfNulls<Proximity.SegmentAcoustic>(nSegs)
+        val segStarts = DoubleArray(nSegs)
+        val segEnds = DoubleArray(nSegs)
+        val segSpks = arrayOfNulls<String>(nSegs)
 
-        // 1. 为所有真实分句写入剔除停顿后的有效语音平均分贝 "db" 与有效发声时长 "act_s"
-        val segDbs = arrayOfNulls<Float>(segArr.length())
-        for (i in 0 until segArr.length()) {
+        for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
             val st = o.optDouble("start")
             val ed = o.optDouble("end")
-            val stats = computeActiveSpeechStats(energies, 0.02, st, ed)
-            if (stats != null) {
-                segDbs[i] = stats.first
-                o.put("db", stats.first.toDouble())
-                o.put("act_s", stats.second.toDouble())
+            segStarts[i] = st
+            segEnds[i] = ed
+            segSpks[i] = o.optString("speaker").takeIf { it.isNotBlank() }
+            val ac = proxProfile.measureSegment(st, ed)
+            if (ac != null) {
+                segAcoustics[i] = ac
+                segDbs[i] = ac.activeDb
+                o.put("db", (ac.activeDb * 10f).roundToInt() / 10.0)
+                o.put("act_s", (ac.activeSec * 100f).roundToInt() / 100.0)
+                o.put("snr_db", (ac.snrDb * 10f).roundToInt() / 10.0)
             }
+        }
+
+        val (chunkMedHf, chunkP90Db) = Proximity.chunkReferenceStats(segAcoustics.toList())
+        val segProximities = arrayOfNulls<String>(nSegs)
+        for (i in 0 until nSegs) {
+            val ac = segAcoustics[i] ?: continue
+            val st = segStarts[i]
+            val ed = segEnds[i]
+            val cProbs = if (ed - st >= 0.7) {
+                val padS = ((st - 0.15).coerceAtLeast(0.0) * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(0, pcm.size)
+                val padE = (min(ed + 0.25, st + 5.0) * KaldiFbank.SAMPLE_RATE).toInt().coerceIn(padS, pcm.size)
+                if (padE - padS >= KaldiFbank.SAMPLE_RATE / 2) {
+                    runCatching { SceneAndMood.inferCedProbs(ctx, pcm, padS, padE) }.getOrNull()
+                } else null
+            } else null
+            segProximities[i] = Proximity.classifySegment(
+                acoustic = ac,
+                chunkMedianHfLfDb = chunkMedHf,
+                chunkP90Db = chunkP90Db,
+                cedProbs = cProbs,
+                isProtectedSpeaker = Proximity.isProtectedSpeakerId(segSpks[i], roster),
+            )
+        }
+        Proximity.smoothShortSegments(segStarts, segEnds, segSpks, segAcoustics, segProximities)
+        for (i in 0 until nSegs) {
+            segProximities[i]?.let { segArr.getJSONObject(i).put("proximity", it) }
         }
 
         val engine = root.optString("engine")
@@ -578,6 +614,12 @@ internal object Voiceprint {
             return finishEnrich(root)
         }
 
+        val nearUttKeys = HashSet<String>()
+        for (i in 0 until nSegs) {
+            if (segProximities[i] == null || segProximities[i] == Proximity.NEAR) {
+                nearUttKeys.add("u_$i")
+            }
+        }
         val clusters = clusterInFile(extractedUtts, IN_FILE_MERGE_SIM)
         val firstSeenStr = Recordings.parseStart(opusFile)?.format(FIRST_SEEN_FMT)
         val keyToSpeaker = matchAndPersistClusters(
@@ -585,6 +627,7 @@ internal object Voiceprint {
             clusters = clusters,
             firstSeen = firstSeenStr,
             allowPersistPrototypes = hasDiarizedLabels,
+            eligiblePersistKeys = nearUttKeys,
         )
 
         val speakerDbAcc = HashMap<String, MutableList<Float>>()
@@ -603,7 +646,7 @@ internal object Voiceprint {
         var fallbackIdx = keyToSpeaker.values.count { it.startsWith("other_") }
         val shortFallback = HashMap<String, String>()
 
-        for (i in 0 until segArr.length()) {
+        for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
             if (o.optString("text").isBlank()) continue
             var finalSpk = segAssigned[i]
@@ -629,6 +672,11 @@ internal object Voiceprint {
             }
             if (finalSpk != null) {
                 o.put("speaker", finalSpk)
+                // 若声纹命中了用户改名保护的核心人物，绝不误标为电子外放
+                if (segProximities[i] == Proximity.MEDIA && Proximity.isProtectedSpeakerId(finalSpk, roster)) {
+                    segProximities[i] = Proximity.NEAR
+                    o.put("proximity", Proximity.NEAR)
+                }
             } else if (isPhoneDirect) {
                 o.remove("speaker")
             }
@@ -723,11 +771,37 @@ internal object Voiceprint {
         Sync.writeFile(f, root.toString())
     }
 
+    /**
+     * 检查一段待筛音频是否匹配本机已受保护的核心人物声纹（如本人 spk_001 或已命名熟人），
+     * 用于整段远近粗筛兜底：当用户把设备放在桌面 1~2 米处说话时绝不误拦。
+     */
+    internal fun matchesProtectedSpeaker(
+        ctx: Context,
+        pcm16k: FloatArray,
+        spans: List<Span>,
+        minSim: Float = 0.58f,
+    ): Boolean {
+        migrateSchemaFast(ctx)
+        val protos = loadPrototypes(ctx)
+        if (protos.isEmpty()) return false
+        val roster = Speakers.all(ctx)
+        val protectedProtos = protos.values.filter { p ->
+            p.model == MODEL_ID && p.centroid.size == EMBED_DIM &&
+                (p.id.startsWith("spk_") || Proximity.isProtectedSpeakerId(p.id, roster))
+        }
+        if (protectedProtos.isEmpty()) return false
+        val (clip, clipSec) = sliceSpeakerAudio(pcm16k, spans)
+        if (clipSec < MIN_SPEECH_S || clip.isEmpty()) return false
+        val emb = extractEmbedding(ctx, clip) ?: return false
+        return protectedProtos.any { p -> cosine(emb, p.centroid) >= minSim }
+    }
+
     internal fun matchAndPersistClusters(
         ctx: Context,
         clusters: List<Pair<List<String>, LocalTurnGroup>>,
         firstSeen: String?,
         allowPersistPrototypes: Boolean = true,
+        eligiblePersistKeys: Set<String>? = null,
     ): Map<String, String> = synchronized(Speakers) {
         migrateSchemaFast(ctx)
         val initialPrototypes = loadPrototypes(ctx)
@@ -776,7 +850,9 @@ internal object Voiceprint {
                     Log.d(TAG, "簇 (${"%.1f".format(cluster.speechSec)}s) 命中声纹 $bestId (cos=${"%.3f".format(bestSim)})")
                     bestId
                 }
-                allowPersistPrototypes && cluster.speechSec >= NEW_SPEAKER_MIN_S -> {
+                allowPersistPrototypes &&
+                    cluster.speechSec >= NEW_SPEAKER_MIN_S &&
+                    (eligiblePersistKeys == null || memberKeys.any { it in eligiblePersistKeys }) -> {
                     val newId = nextPhoneSpeakerId()
                     savePrototype(ctx, newId, cluster.embedding, cluster.speechSec, firstSeen, cluster.bestSample, nextSeq)
                     Log.i(TAG, "新建手机声纹人物 $newId (${"%.1f".format(cluster.speechSec)}s, bestOldCos=${"%.3f".format(bestSim)})")

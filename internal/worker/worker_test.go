@@ -252,6 +252,8 @@ func TestSceneTagsAndMoodPersistAndQueryRoundTrip(t *testing.T) {
 	mood := "positive"
 	score := 0.68
 	vocal := "笑声"
+	prox := "near"
+	snr := 22.4
 	spk := "spk_001"
 	payload := protocol.TranscriptPayload{
 		Name:      "20261113-140000.opus",
@@ -268,6 +270,8 @@ func TestSceneTagsAndMoodPersistAndQueryRoundTrip(t *testing.T) {
 				End:       9.0,
 				Text:      "这个改动体验特别顺畅！",
 				Speaker:   &spk,
+				SnrDB:     &snr,
+				Proximity: &prox,
 				Mood:      &mood,
 				MoodScore: &score,
 				VocalTag:  &vocal,
@@ -291,8 +295,8 @@ func TestSceneTagsAndMoodPersistAndQueryRoundTrip(t *testing.T) {
 	if len(detail.SceneTags) != 2 || detail.SceneTags[0].Label != "敲键盘" {
 		t.Fatalf("unexpected SceneTags: %+v", detail.SceneTags)
 	}
-	if len(detail.Segments) != 1 || detail.Segments[0].Mood != "positive" || detail.Segments[0].VocalTag != "笑声" {
-		t.Fatalf("unexpected Segment mood: %+v", detail.Segments)
+	if len(detail.Segments) != 1 || detail.Segments[0].Mood != "positive" || detail.Segments[0].VocalTag != "笑声" || detail.Segments[0].Proximity != "near" || detail.Segments[0].SnrDB == nil || *detail.Segments[0].SnrDB != 22.4 {
+		t.Fatalf("unexpected Segment meta: %+v", detail.Segments)
 	}
 }
 

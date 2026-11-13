@@ -53,7 +53,7 @@ object Recordings {
     fun cleanup(dir: File, mode: WorkMode = WorkMode.CLOUD, today: LocalDate = LocalDate.now()) {
         val keepFrom = today.minusDays(RETENTION_DAYS - 1).atStartOfDay()
         // 还没处理完的不删：断网或欠费时宁可多占空间，也不能丢录音
-        val done = listOf("uploaded", "novoice").map { File(dir.parentFile, it) }
+        val done = listOf("uploaded", "novoice", "farvoice").map { File(dir.parentFile, it) }
         val textsDir = File(dir.parentFile, "texts")
         dir.listFiles { f -> f.name.endsWith(".opus") }?.forEach { f ->
             val start = parseStart(f)

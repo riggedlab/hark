@@ -58,7 +58,9 @@ type ResolvedSegment struct {
 	SpeakerID    string   `json:"speaker_id,omitempty"`
 	SpeakerLabel string   `json:"speaker_label,omitempty"`
 	DB           *float64 `json:"db,omitempty"`
+	SnrDB        *float64 `json:"snr_db,omitempty"`
 	ActiveS      *float64 `json:"act_s,omitempty"`
+	Proximity    string   `json:"proximity,omitempty"`
 	Mood         string   `json:"mood,omitempty"`
 	MoodScore    *float64 `json:"mood_score,omitempty"`
 	VocalTag     string   `json:"vocal_tag,omitempty"`
