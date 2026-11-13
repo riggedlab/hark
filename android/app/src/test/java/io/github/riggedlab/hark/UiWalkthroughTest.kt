@@ -154,7 +154,7 @@ class UiWalkthroughTest {
         rule.mainClock.advanceTimeBy(500)
         rule.waitForIdle()
 
-        // 1. 待机态模式 B「主客气泡流」：验证无分贝数字、例外标签「愉悦 · 笑声 / 轻声」、快筛胶囊、远场静默胶囊，以及底部毛玻璃胶囊栏基线
+        // 1. 待机态模式 B「主客气泡流」：验证严格从近到远排序（16:40:10 张工回复在 16:40:01 之前发言上方，且均在 15:15 备忘上方）、无分贝数字、例外标签与底部胶囊基线
         rule.onNodeWithText("Hark").assertIsDisplayed()
         rule.onNodeWithText("只看我说").assertIsDisplayed()
         rule.onNodeWithText("愉悦 · 笑声").assertIsDisplayed()
@@ -162,6 +162,13 @@ class UiWalkthroughTest {
         rule.onNodeWithText("已静默 1 段邻桌远场声 · 展开").assertIsDisplayed()
         rule.onAllNodesWithText("-19.6dB", substring = true).assertCountEquals(0)
         rule.onAllNodesWithText("中性", substring = true).assertCountEquals(0)
+
+        val newerTurnTop = rule.onNodeWithText("周五下午三点再过一遍超薄磁吸外壳", substring = true).fetchSemanticsNode().boundsInRoot.top
+        val olderTurnTop = rule.onNodeWithText("先把手机直连和云端信箱两条路径做干净", substring = true).fetchSemanticsNode().boundsInRoot.top
+        val oldestMemoTop = rule.onNodeWithText("备忘一下今晚把本地 hark timeline", substring = true).fetchSemanticsNode().boundsInRoot.top
+        assertTrue("同段内最新发言必须排在更早发言上方 ($newerTurnTop < $olderTurnTop)", newerTurnTop < olderTurnTop)
+        assertTrue("近期对话必须排在更早时段上方 ($olderTurnTop < $oldestMemoTop)", olderTurnTop < oldestMemoTop)
+
         val dockBoundsIdle = rule.onNodeWithText("人物").fetchSemanticsNode().boundsInRoot
         captureAllWindows("01-mode-b-dialogue-idle")
 
@@ -253,9 +260,42 @@ class UiWalkthroughTest {
         rule.onNodeWithContentDescription("搜索记录").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("搜索对话文字、人物或地点…").performTextInput("外壳")
-        rule.mainClock.advanceTimeBy(120)
+        rule.mainClock.advanceTimeBy(200)
         rule.waitForIdle()
         rule.onAllNodesWithText("张工").onFirst().assertIsDisplayed()
         captureAllWindows("09-search-filtered")
+    }
+
+    @Test
+    fun homeFeedLazyLoadsFirstPageWithoutParsingEntireHistory() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        // 额外写入 36 条更早日期的历史转写（超过首页 INITIAL_CHUNK_BUDGET = 28）
+        for (i in 1..36) {
+            val hh = (i / 6).toString().padStart(2, '0')
+            val mm = ((i % 6) * 10).toString().padStart(2, '0')
+            val name = "20261101-${hh}${mm}00.opus"
+            Transcripts.save(
+                ctx,
+                JSONObject()
+                    .put("name", name)
+                    .put("duration_s", 60.0)
+                    .put("text", "十天前的远古历史记录第 $i 条")
+                    .put(
+                        "segments",
+                        JSONArray().put(
+                            JSONObject().put("start", 1.0).put("end", 5.0).put("text", "十天前的远古历史记录第 $i 条").put("proximity", "near"),
+                        ),
+                    ),
+            )
+        }
+        AppState.update { it.copy(textVersion = it.textVersion + 1) }
+        rule.waitUntil(5_000) {
+            rule.onAllNodesWithText("11月1日", substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.waitForIdle()
+
+        // 首屏仅解析最新 INITIAL_CHUNK_BUDGET(28) 条（2 条 11.12 + 最新 26 条 11.01），最早的第 1 条绝不进入首屏树！
+        rule.onNodeWithText("11月12日", substring = true).assertIsDisplayed()
+        rule.onAllNodesWithText("十天前的远古历史记录第 1 条", substring = true).assertCountEquals(0)
     }
 }
