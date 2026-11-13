@@ -9,7 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import kotlinx.coroutines.runBlocking
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,6 +31,7 @@ class RecorderService : Service() {
     private var bytesThisSecond = 0
     private lateinit var uploader: Uploader
     private var started = false
+    private val main = Handler(Looper.getMainLooper())
     private val syncQueued = AtomicBoolean(false)
     @Volatile private var closing = false
 
@@ -36,6 +39,10 @@ class RecorderService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (!BlePermissions.hasRequired(this)) {
+            stopWithMessage(BlePermissions.DENIED_MESSAGE)
+            return
+        }
         uploader = Uploader(this)
         chunks = ChunkRecorder(chunkDir(this), onChunkReady = { requestSync() })
         val notifySpeech = Runnable { if (!closing) chunks.onSpeechDetected() }
@@ -44,25 +51,29 @@ class RecorderService : Service() {
         }
         ble = BleLink(
             this,
-            onAudio = { seq, opus ->
-                io.execute {
-                    try {
-                        if (chunks.onPacket(seq, opus)) {
-                            bytesThisSecond += opus.size
-                            val writtenAt = chunks.lastWriteNanos
-                            val prev = AppState.status.value.lastWriteNanos
-                            if (writtenAt != 0L && (prev == 0L || writtenAt - prev >= 400_000_000L)) {
-                                AppState.update { it.copy(lastWriteNanos = writtenAt) }
+            onAudio = audio@ { seq, opus ->
+                if (closing) return@audio
+                try {
+                    io.execute {
+                        try {
+                            if (chunks.onPacket(seq, opus)) {
+                                bytesThisSecond += opus.size
+                                val writtenAt = chunks.lastWriteNanos
+                                val prev = AppState.status.value.lastWriteNanos
+                                if (writtenAt != 0L && (prev == 0L || writtenAt - prev >= 400_000_000L)) {
+                                    AppState.update { it.copy(lastWriteNanos = writtenAt) }
+                                }
+                                LiveAudioMonitor.offer(seq, opus)
                             }
-                            LiveAudioMonitor.offer(seq, opus)
+                        } catch (_: Exception) {
+                            AppState.update { it.copy(message = "录音写入失败，请检查手机存储空间") }
                         }
-                    } catch (_: Exception) {
-                        AppState.update { it.copy(message = "录音写入失败，请检查手机存储空间") }
                     }
-                }
+                } catch (_: RejectedExecutionException) { /* 撤权停止时丢弃迟到的回调 */ }
             },
             onBattery = { mv -> AppState.update { it.copy(batteryMv = mv) } },
-            onState = { state, info ->
+            onState = stateChanged@ { state, info ->
+                if (closing) return@stateChanged
                 android.util.Log.i("BleLink", "state $state ${info ?: ""}")
                 if (state != LinkState.STREAMING) {
                     LiveAudioMonitor.reset()
@@ -80,9 +91,15 @@ class RecorderService : Service() {
                 }
                 updateNotification()
             },
+            onPermissionLost = { stopWithMessage(BlePermissions.REVOKED_MESSAGE) },
         )
         // 每秒刷新一次统计
         io.scheduleAtFixedRate({
+            // 正在扫描或静默等待重连时，系统未必再回调 BLE；复用统计节拍检测撤权。
+            if (!closing && !BlePermissions.hasRequired(this)) {
+                main.post { if (!closing) stopWithMessage(BlePermissions.REVOKED_MESSAGE) }
+                return@scheduleAtFixedRate
+            }
             val bps = bytesThisSecond
             bytesThisSecond = 0
             AppState.update {
@@ -122,7 +139,11 @@ class RecorderService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startForegroundCompat()
+        if (closing) return START_NOT_STICKY
+        if (!BlePermissions.hasRequired(this)) {
+            return stopWithMessage(if (started) BlePermissions.REVOKED_MESSAGE else BlePermissions.DENIED_MESSAGE)
+        }
+        if (!startForegroundCompat()) return START_NOT_STICKY
         // 刚给了定位权限：只需要重新声明前台服务类型，蓝牙不用重连
         if (intent?.action == ACTION_REFRESH && started) { Places.requestFix(this); return START_STICKY }
         val wasStarted = started
@@ -133,15 +154,26 @@ class RecorderService : Service() {
         }
         if (intent?.action == ACTION_REPAIR) ble.repair()
         else if (!wasStarted) ble.start()
+        if (closing) return START_NOT_STICKY
         return START_STICKY      // 被系统杀掉后尽量自动重启
+    }
+
+    private fun stopWithMessage(message: String): Int {
+        closing = true
+        if (::ble.isInitialized) ble.stop()
+        AppState.update { it.copy(link = LinkState.STOPPED, message = message,
+            lastWriteNanos = 0, bytesPerSec = 0) }
+        stopSelf()
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
         closing = true
-        ble.stop()
+        main.removeCallbacksAndMessages(null)
+        if (::ble.isInitialized) ble.stop()
         LiveAudioMonitor.stop()
         val ctx = applicationContext
-        finishRecording(io, closeChunk = {
+        if (::chunks.isInitialized) finishRecording(io, closeChunk = {
             try { chunks.closeChunk() }
             finally { wakeLock?.release(); wakeLock = null }
         }, upload = {
@@ -161,23 +193,34 @@ class RecorderService : Service() {
         })
         net.shutdownNow()
         io.shutdown()
-        AppState.update { it.copy(link = LinkState.STOPPED) }
+        AppState.update { it.copy(link = LinkState.STOPPED, lastWriteNanos = 0, bytesPerSec = 0) }
         super.onDestroy()
     }
 
-    private fun startForegroundCompat() {
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "录音状态", NotificationManager.IMPORTANCE_LOW))
-        val n = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // 有定位权限时同时声明 location 类型，这样后台也能定位；从后台被系统重启时不允许，就退回只用蓝牙类型
-            val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            val withLoc = if (Places.hasPermission(this)) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else base
-            runCatching { startForeground(NOTIF_ID, n, withLoc) }
-                .onFailure { startForeground(NOTIF_ID, n, base) }
-        } else {
-            startForeground(NOTIF_ID, n)
+    private fun startForegroundCompat(): Boolean {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL, "录音状态", NotificationManager.IMPORTANCE_LOW))
+            val n = buildNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // location 提权失败时退回蓝牙类型；回退也由外层捕获，不能因缺权限崩溃。
+                val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                val withLoc = if (Places.hasPermission(this)) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else base
+                if (withLoc != base) {
+                    try { startForeground(NOTIF_ID, n, withLoc) }
+                    catch (_: RuntimeException) { startForeground(NOTIF_ID, n, base) }
+                } else startForeground(NOTIF_ID, n, base)
+            } else {
+                startForeground(NOTIF_ID, n)
+            }
+            return true
+        } catch (e: RuntimeException) {
+            android.util.Log.w("RecorderService", "前台录音服务启动失败", e)
+            stopWithMessage(if (!BlePermissions.hasRequired(this)) {
+                if (started) BlePermissions.REVOKED_MESSAGE else BlePermissions.DENIED_MESSAGE
+            } else "无法启动录音，请重试")
+            return false
         }
     }
 

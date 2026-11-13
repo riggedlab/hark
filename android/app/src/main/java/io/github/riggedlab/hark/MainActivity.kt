@@ -430,11 +430,17 @@ class MainActivity : ComponentActivity() {
     private var configVersion by mutableIntStateOf(0)
     private var hasLocation by mutableStateOf(false)
     private var startAction: String? = null
+    private var showBlePermissionDialog by mutableStateOf(false)
+    private var blePermissionNeedsSettings by mutableStateOf(false)
     private var destination by mutableStateOf(RootDestination.MAIN)
 
-    private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) {
+    private val permLauncher = registerForActivityResult(RequestMultiplePermissions()) { grants ->
         hasLocation = Places.hasPermission(this)
-        startRecorder(startAction)
+        if (BlePermissions.hasRequired(Build.VERSION.SDK_INT) { grants[it] == true }) {
+            startRecorder(startAction)
+        } else {
+            showBlePermissionDenied()
+        }
     }
 
     private val locLauncher = registerForActivityResult(RequestMultiplePermissions()) {
@@ -462,17 +468,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun neededPermissions(): Array<String> = buildList {
-        if (Build.VERSION.SDK_INT >= 31) {
-            add(Manifest.permission.BLUETOOTH_SCAN)
-            add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-        add(Manifest.permission.ACCESS_FINE_LOCATION)
+        addAll(BlePermissions.required(Build.VERSION.SDK_INT))
+        if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.ACCESS_FINE_LOCATION)
         add(Manifest.permission.ACCESS_COARSE_LOCATION)
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
     }.toTypedArray()
 
     private fun requestStart(repair: Boolean = false) {
         startAction = if (repair) RecorderService.ACTION_REPAIR else null
+        showBlePermissionDialog = false
         permLauncher.launch(neededPermissions())
     }
 
@@ -480,8 +484,30 @@ class MainActivity : ComponentActivity() {
         arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
     )
 
-    private fun startRecorder(action: String? = null) =
-        startForegroundService(Intent(this, RecorderService::class.java).setAction(action))
+    private fun startRecorder(action: String? = null) {
+        if (!BlePermissions.hasRequired(this)) {
+            showBlePermissionDenied()
+            return
+        }
+        try {
+            startForegroundService(Intent(this, RecorderService::class.java).setAction(action))
+        } catch (_: SecurityException) {
+            showBlePermissionDenied()
+        } catch (e: IllegalStateException) {
+            android.util.Log.w("RecorderService", "无法从当前状态启动前台录音服务", e)
+            AppState.update { it.copy(message = "无法启动录音，请重试") }
+        }
+    }
+
+    private fun showBlePermissionDenied(message: String = BlePermissions.DENIED_MESSAGE) {
+        if (message == BlePermissions.REVOKED_MESSAGE) startAction = null
+        blePermissionNeedsSettings = BlePermissions.required(Build.VERSION.SDK_INT).any {
+            checkSelfPermission(it) != android.content.pm.PackageManager.PERMISSION_GRANTED &&
+                !shouldShowRequestPermissionRationale(it)
+        }
+        AppState.update { it.copy(message = message) }
+        showBlePermissionDialog = true
+    }
 
     private fun stopRecorder() =
         startService(Intent(this, RecorderService::class.java).setAction(RecorderService.ACTION_STOP))
@@ -1052,6 +1078,14 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun RootHost() {
+        val recorderMessage by remember {
+            AppState.status.map { it.message }.distinctUntilChanged()
+        }.collectAsStateWithLifecycle(initialValue = AppState.status.value.message)
+        LaunchedEffect(recorderMessage) {
+            if (recorderMessage == BlePermissions.DENIED_MESSAGE || recorderMessage == BlePermissions.REVOKED_MESSAGE) {
+                showBlePermissionDenied(recorderMessage!!)
+            }
+        }
         var feedSnap by remember { mutableStateOf(FeedPageSnapshot()) }
         var chunkBudget by rememberSaveable { mutableIntStateOf(INITIAL_CHUNK_BUDGET) }
         var activeLens by rememberSaveable { mutableStateOf("all") }
@@ -1263,6 +1297,26 @@ class MainActivity : ComponentActivity() {
 
         PersonDialogs(peoplePair.first)
         PlaceDialogs(placesList)
+        if (showBlePermissionDialog) {
+            AlertDialog(
+                onDismissRequest = { showBlePermissionDialog = false },
+                shape = MaterialTheme.shapes.large,
+                title = { Text(if (recorderMessage == BlePermissions.REVOKED_MESSAGE) "录音已停止" else "设备权限未开启") },
+                text = { Text(if (recorderMessage == BlePermissions.REVOKED_MESSAGE) BlePermissions.REVOKED_MESSAGE else BlePermissions.DENIED_MESSAGE) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showBlePermissionDialog = false
+                        if (blePermissionNeedsSettings) {
+                            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.parse("package:$packageName")))
+                        } else requestStart(repair = startAction == RecorderService.ACTION_REPAIR)
+                    }) { Text(if (blePermissionNeedsSettings) "去设置" else "重试") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showBlePermissionDialog = false }) { Text("取消") }
+                },
+            )
+        }
     }
 
     @Composable
@@ -1291,6 +1345,13 @@ class MainActivity : ComponentActivity() {
         val clipboard = LocalClipboardManager.current
         val haptic = LocalHapticFeedback.current
         var showStatusPanel by remember { mutableStateOf(false) }
+
+        val recorderMessage by remember {
+            AppState.status.map { it.message }.distinctUntilChanged()
+        }.collectAsStateWithLifecycle(initialValue = AppState.status.value.message)
+        LaunchedEffect(recorderMessage) {
+            if (recorderMessage == "无法启动录音，请重试") snackbarHostState.showSnackbar(recorderMessage!!)
+        }
 
         val feedTabLabel = if (feedStyle == FeedStyle.DIALOGUE) "对话流" else "今日脉络"
         val tabs = remember(feedTabLabel) { listOf(feedTabLabel, "人物", "足迹") }

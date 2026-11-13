@@ -30,6 +30,7 @@ class BleLink(
     private val onAudio: (seq: Int, opus: ByteArray) -> Unit,
     private val onBattery: (mv: Int) -> Unit,
     private val onState: (LinkState, String?) -> Unit,
+    private val onPermissionLost: () -> Unit,
 ) {
     private val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
     private val main = Handler(Looper.getMainLooper())
@@ -55,33 +56,39 @@ class BleLink(
         override fun run() {
             val g = gatt
             if (!running || g == null || stage != Stage.STREAMING) return
-            val idle = android.os.SystemClock.elapsedRealtime() - lastNotifyAt
-            if (idle < STALL_MS) { main.postDelayed(this, STALL_MS - idle); return }
-            android.util.Log.w("BleLink", "no data for ${idle}ms while streaming, reconnecting")
-            closeGatt()
-            onState(LinkState.RECONNECTING, null)
-            arm(1000) { connect(g.device, auto = true) }
+            withPermissions {
+                val idle = android.os.SystemClock.elapsedRealtime() - lastNotifyAt
+                if (idle < STALL_MS) { main.postDelayed(this, STALL_MS - idle); return@withPermissions }
+                android.util.Log.w("BleLink", "no data for ${idle}ms while streaming, reconnecting")
+                closeGatt()
+                onState(LinkState.RECONNECTING, null)
+                arm(1000) { connect(g.device, auto = true) }
+            }
         }
     }
 
     fun start() {
         if (running) return
         running = true
-        // 蓝牙广播可能来自独立的高权限进程，需 EXPORTED；此 action 是系统保护广播。
-        ContextCompat.registerReceiver(context, bondReceiver,
-            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED)
-        receiverRegistered = true
-        val saved = prefs.getString(KEY_ADDR, null)
-        val device = saved?.let { runCatching { adapter.getRemoteDevice(it) }.getOrNull() }
-        if (device != null && device.bondState == BluetoothDevice.BOND_BONDED) {
-            connect(device, auto = true)
-        } else {
-            prefs.edit().remove(KEY_ADDR).apply()
-            scan(if (saved != null) "系统配对已失效，请点「重新配对」，再按一下板子上的按键" else null)
+        withPermissions {
+            // 蓝牙广播可能来自独立的高权限进程，需 EXPORTED；此 action 是系统保护广播。
+            ContextCompat.registerReceiver(context, bondReceiver,
+                IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED)
+            receiverRegistered = true
+            val saved = prefs.getString(KEY_ADDR, null)
+            val device = saved?.let { remoteDevice(it) }
+            if (device != null && device.bondState == BluetoothDevice.BOND_BONDED) {
+                connect(device, auto = true)
+            } else {
+                prefs.edit().remove(KEY_ADDR).apply()
+                scan(if (saved != null) "系统配对已失效，请点「重新配对」，再按一下板子上的按键" else null)
+            }
         }
     }
 
-    fun stop() {
+    fun stop() = stop(notifyState = true)
+
+    private fun stop(notifyState: Boolean) {
         running = false
         main.removeCallbacksAndMessages(null)
         timeout = null
@@ -92,27 +99,50 @@ class BleLink(
             context.unregisterReceiver(bondReceiver)
             receiverRegistered = false
         }
-        onState(LinkState.STOPPED, null)
+        if (notifyState) onState(LinkState.STOPPED, null)
     }
 
     fun repair() {
-        val device = selectedDevice ?: prefs.getString(KEY_ADDR, null)?.let {
-            runCatching { adapter.getRemoteDevice(it) }.getOrNull()
+        running = true
+        withPermissions {
+            val device = selectedDevice ?: prefs.getString(KEY_ADDR, null)?.let {
+                remoteDevice(it)
+            }
+            stop()
+            prefs.edit().remove(KEY_ADDR).apply()
+            blockedAddress = null
+            repairOnDiscovery = device == null
+            start()
+            if (running && device != null) removeSystemBond(device)
         }
-        stop()
-        prefs.edit().remove(KEY_ADDR).apply()
-        blockedAddress = null
-        repairOnDiscovery = device == null
-        start()
-        if (device != null) removeSystemBond(device)
+    }
+
+    private fun remoteDevice(address: String): BluetoothDevice? =
+        try { adapter.getRemoteDevice(address) } catch (_: IllegalArgumentException) { null }
+
+    /** 所有异步 BLE 入口共用，检查与系统调用间仍可能撤权，所以还要捕获异常。 */
+    private inline fun withPermissions(action: () -> Unit) {
+        try {
+            if (!BlePermissions.hasRequired(context)) throw SecurityException("BLE permission revoked")
+            action()
+        } catch (_: SecurityException) {
+            if (running) {
+                stop(notifyState = false)
+                onPermissionLost()
+            }
+        }
     }
 
     /** removeBond 是异步操作，等 NONE 后才允许扫描结果进入 createBond。 */
     private fun removeSystemBond(device: BluetoothDevice): Boolean {
         if (device.bondState == BluetoothDevice.BOND_NONE) return false
-        val requested = runCatching {
+        val requested = try {
             device.javaClass.getMethod("removeBond").invoke(device) == true
-        }.getOrDefault(false)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val cause = e.cause
+            if (cause is SecurityException) throw cause
+            false
+        } catch (e: ReflectiveOperationException) { false }
         if (!requested) {
             scanMessage = "请按一下板子上的按键；若仍无法配对，请先在系统蓝牙设置中忘记 Hark DT-1"
             onState(LinkState.SCANNING, scanMessage)
@@ -155,30 +185,35 @@ class BleLink(
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             main.post {
-                if (!running || !scanning || result.device.address == blockedAddress) return@post
-                val mark = result.scanRecord?.getServiceData(ParcelUuid(SVC_UUID))
-                if (mark?.contentEquals(PAIR_MARKER) != true) return@post
-                if (result.device.address == removingAddress) {
-                    if (result.device.bondState != BluetoothDevice.BOND_NONE) return@post
-                    removingAddress = null
-                    clearTimeout()
+                if (!running || !scanning) return@post
+                withPermissions {
+                    if (result.device.address == blockedAddress) return@withPermissions
+                    val mark = result.scanRecord?.getServiceData(ParcelUuid(SVC_UUID))
+                    if (mark?.contentEquals(PAIR_MARKER) != true) return@withPermissions
+                    if (result.device.address == removingAddress) {
+                        if (result.device.bondState != BluetoothDevice.BOND_NONE) return@withPermissions
+                        removingAddress = null
+                        clearTimeout()
+                    }
+                    if (repairOnDiscovery) {
+                        repairOnDiscovery = false
+                        selectedDevice = result.device
+                        if (removeSystemBond(result.device)) return@withPermissions
+                    }
+                    stopScan()
+                    connect(result.device, auto = false)
                 }
-                if (repairOnDiscovery) {
-                    repairOnDiscovery = false
-                    selectedDevice = result.device
-                    if (removeSystemBond(result.device)) return@post
-                }
-                stopScan()
-                connect(result.device, auto = false)
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
             main.post {
                 if (!running || !scanning) return@post
-                scanning = false
-                onState(LinkState.SCANNING, "扫描失败 ($errorCode)，5 秒后重试；请按一下板子上的按键")
-                arm(5000) { scan(scanMessage) }
+                withPermissions {
+                    scanning = false
+                    onState(LinkState.SCANNING, "扫描失败 ($errorCode)，5 秒后重试；请按一下板子上的按键")
+                    arm(5000) { scan(scanMessage) }
+                }
             }
         }
     }
@@ -207,21 +242,24 @@ class BleLink(
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
             if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
-            @Suppress("DEPRECATION")
-            val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
-            val bond = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
-            if (!running || device.bondState != bond) return // 忽略排队过久的旧广播
-            if (device.address == removingAddress && bond == BluetoothDevice.BOND_NONE) {
-                removingAddress = null
-                clearTimeout()
-                return
-            }
-            val g = gatt ?: return
-            if (!running || device.address != g.device.address) return
-            when (bond) {
-                BluetoothDevice.BOND_BONDED -> if (stage == Stage.BONDING) bonded(g)
-                BluetoothDevice.BOND_NONE -> pairingProblem(
-                    "配对失败或已被解除；请按键后点「重新配对」", rescan = true)
+            if (!running) return
+            withPermissions {
+                @Suppress("DEPRECATION")
+                val device = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return@withPermissions
+                val bond = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+                if (device.bondState != bond) return@withPermissions // 忽略排队过久的旧广播
+                if (device.address == removingAddress && bond == BluetoothDevice.BOND_NONE) {
+                    removingAddress = null
+                    clearTimeout()
+                    return@withPermissions
+                }
+                val g = gatt ?: return@withPermissions
+                if (device.address != g.device.address) return@withPermissions
+                when (bond) {
+                    BluetoothDevice.BOND_BONDED -> if (stage == Stage.BONDING) bonded(g)
+                    BluetoothDevice.BOND_NONE -> pairingProblem(
+                        "配对失败或已被解除；请按键后点「重新配对」", rescan = true)
+                }
             }
         }
     }
@@ -266,13 +304,14 @@ class BleLink(
         gatt = null
         stage = Stage.IDLE
         pendingCcc.clear()
-        old?.disconnect()
-        old?.close()
+        // 撤权后 disconnect/close 也可能拒绝调用；各自兜底，保证后续封尾和释放锁能执行。
+        try { old?.disconnect() } catch (_: SecurityException) { }
+        try { old?.close() } catch (_: SecurityException) { }
     }
 
     private fun arm(ms: Long, action: () -> Unit) {
         clearTimeout()
-        timeout = Runnable { if (running) action() }.also { main.postDelayed(it, ms) }
+        timeout = Runnable { if (running) withPermissions(action) }.also { main.postDelayed(it, ms) }
     }
 
     private fun clearTimeout() {
@@ -281,7 +320,7 @@ class BleLink(
     }
 
     private fun dispatch(g: BluetoothGatt, action: () -> Unit) {
-        main.post { if (running && g === gatt) action() }
+        main.post { if (running && g === gatt) withPermissions(action) }
     }
 
     private val gattCb = object : BluetoothGattCallback() {
