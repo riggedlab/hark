@@ -64,11 +64,13 @@ const state: UIState = {
   presets: [],
   providerUrls: {
     volcengine: "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+    dashscope: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
     openai: "https://api.siliconflow.cn/v1",
     hark_http: "http://127.0.0.1:8765",
   },
   providerModels: {
     volcengine: "volc.bigasr.auc_turbo",
+    dashscope: "qwen-audio-3.1-asr-flash",
     openai: "FunAudioLLM/SenseVoiceSmall",
     hark_http: "",
   },
@@ -167,6 +169,7 @@ function fmtMMSS(sec: number): string {
 
 function humanProvider(p: string): string {
   if (p === "volcengine") return "豆包大模型";
+  if (p === "dashscope") return "阿里云百炼";
   if (p === "hark_http") return "本地声纹";
   if (p === "mock") return "内置模拟";
   return "云端 API";
@@ -292,7 +295,9 @@ function renderSidebar(): string {
   const activeProv =
     state.config?.asr.provider === "volcengine"
       ? "豆包"
-      : state.config?.asr.provider === "hark_http"
+      : state.config?.asr.provider === "dashscope"
+        ? "百炼"
+        : state.config?.asr.provider === "hark_http"
         ? "声纹"
         : state.config?.asr.provider === "mock"
           ? "模拟"
@@ -568,6 +573,29 @@ function renderASRWorkspace(): string {
       </div>
       <p class="note-line">同步直传内存中的 Ogg Opus 音频，无需中转对象存储；自带标点顺滑、精确分句时间戳与单段内说话人分离。</p>
     `;
+  } else if (prov === "dashscope") {
+    formFields = `
+      <div class="field">
+        <label class="field-label" for="dashscope-key">
+          <span>阿里云百炼 API Key</span>
+          ${state.keychainActive ? `<span style="font-weight:400;color:var(--text-muted);">系统钥匙串保护</span>` : ""}
+        </label>
+        <div class="input-group">
+          <input id="dashscope-key" type="${state.showSecrets ? "text" : "password"}" class="mono" placeholder="粘贴百炼控制台创建的 API Key" value="${escapeHTML(d.asr.api_key || "")}" data-field="asr.api_key" />
+          <button class="btn" data-action="toggle-secrets">${state.showSecrets ? "隐藏" : "显示"}</button>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="dashscope-model"><span>模型名称</span></label>
+        <input id="dashscope-model" type="text" class="mono" placeholder="qwen-audio-3.1-asr-flash" value="${escapeHTML(d.asr.model || "qwen-audio-3.1-asr-flash")}" data-field="asr.model" />
+      </div>
+      <div class="field">
+        <label class="field-label" for="dashscope-url"><span>原生接口地址（需与 Key 的地域一致）</span></label>
+        <input id="dashscope-url" type="text" class="mono" placeholder="https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation" value="${escapeHTML(d.asr.base_url)}" data-field="asr.base_url" />
+      </div>
+      <p class="note-line">在百炼控制台开通模型并创建 API Key；新加坡地域可用 dashscope-intl.aliyuncs.com，也可填控制台提供的工作空间域名。直接发送 Ogg Opus，单段最长 5 分钟，支持分句时间戳与单段说话人分离。</p>
+      <button class="btn" data-action="open-dashscope-console">打开百炼控制台 ↗</button>
+    `;
   } else if (prov === "openai") {
     const chips = state.presets
       .filter((p) => p.provider === "openai")
@@ -671,6 +699,7 @@ function renderASRWorkspace(): string {
             <h3 class="panel-title">接入协议</h3>
             <div class="seg-group" role="group" aria-label="ASR 协议类型">
               <button class="seg-btn ${prov === "volcengine" ? "active" : ""}" data-provider="volcengine">豆包大模型</button>
+              <button class="seg-btn ${prov === "dashscope" ? "active" : ""}" data-provider="dashscope">阿里云百炼</button>
               <button class="seg-btn ${prov === "openai" ? "active" : ""}" data-provider="openai">OpenAI 兼容</button>
               <button class="seg-btn ${prov === "hark_http" ? "active" : ""}" data-provider="hark_http">Hark 本地声纹</button>
               <button class="seg-btn ${prov === "mock" ? "active" : ""}" data-provider="mock">内置模拟</button>
@@ -915,6 +944,10 @@ function bindGlobalListeners() {
           state.providerUrls.volcengine || "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash";
         state.draft.asr.model = state.providerModels.volcengine || "volc.bigasr.auc_turbo";
         state.draft.asr.api_key = state.providerKeys.volcengine || "";
+      } else if (p === "dashscope") {
+        state.draft.asr.base_url = state.providerUrls.dashscope || "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
+        state.draft.asr.model = state.providerModels.dashscope || "qwen-audio-3.1-asr-flash";
+        state.draft.asr.api_key = state.providerKeys.dashscope || "";
       } else if (p === "hark_http") {
         state.draft.asr.base_url = state.providerUrls.hark_http || "http://127.0.0.1:8765";
         state.draft.asr.model = state.providerModels.hark_http || "";
@@ -948,6 +981,10 @@ function bindGlobalListeners() {
     }
 
     switch (btn.dataset.action) {
+      case "open-dashscope-console": {
+        await Hark.openExternalDocs("https://bailian.console.aliyun.com/");
+        break;
+      }
       case "toggle-pause": {
         const next = !(state.status?.paused ?? false);
         state.status = await Hark.togglePause(next);

@@ -1,6 +1,7 @@
 package io.github.riggedlab.hark
 
 import android.content.Context
+import java.net.URI
 
 enum class WorkMode(val id: String, val label: String) {
     CLOUD("cloud", "云端信箱同步"),
@@ -33,6 +34,13 @@ enum class AsrProvider(
         shortLabel = "豆包语音",
         defaultUrl = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
         defaultModel = "volc.bigasr.auc_turbo",
+    ),
+    DASHSCOPE(
+        id = "dashscope",
+        label = "阿里云百炼（原生接口）",
+        shortLabel = "阿里云百炼",
+        defaultUrl = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+        defaultModel = "qwen-audio-3.1-asr-flash",
     ),
     OPENAI(
         id = "openai",
@@ -81,6 +89,14 @@ data class AsrConfig(
                     model = rawModel.ifBlank { provider.defaultModel },
                 )
             }
+            AsrProvider.DASHSCOPE -> {
+                val endpoint = rawUrl.ifBlank { provider.defaultUrl }.trimEnd('/')
+                val uri = runCatching { URI(endpoint) }.getOrNull()
+                val url = if (uri?.host != null && uri.rawPath.isNullOrEmpty()) {
+                    URI(uri.scheme, uri.authority, "/api/v1/services/aigc/multimodal-generation/generation", uri.query, uri.fragment).toString()
+                } else endpoint
+                AsrConfig(provider, url, cleanKey, model = rawModel.ifBlank { provider.defaultModel })
+            }
             AsrProvider.OPENAI -> AsrConfig(
                 provider = provider,
                 baseUrl = rawUrl.ifBlank { provider.defaultUrl }.trimEnd('/'),
@@ -102,6 +118,11 @@ data class AsrConfig(
         val c = normalized()
         return when (c.provider) {
             AsrProvider.VOLCENGINE -> if (c.apiKey.isBlank()) "未填写豆包语音 API Key（点下方「转写与同步设置」）" else null
+            AsrProvider.DASHSCOPE -> when {
+                c.apiKey.isBlank() -> "未填写阿里云百炼 API Key（点下方「转写与同步设置」）"
+                !runCatching { URI(c.baseUrl).let { it.host != null && it.scheme in listOf("http", "https") } }.getOrDefault(false) -> "百炼接口地址需为有效的 http:// 或 https:// URL"
+                else -> null
+            }
             AsrProvider.OPENAI -> when {
                 c.baseUrl.isBlank() -> "未填写 OpenAI 兼容接口地址"
                 c.model.isBlank() -> "未填写转写模型名称"

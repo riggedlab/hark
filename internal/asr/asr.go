@@ -22,13 +22,14 @@ var probeAudio []byte
 
 const (
 	ProviderVolcengine = "volcengine"
+	ProviderDashScope  = "dashscope"
 	ProviderOpenAI     = "openai"
 	ProviderHarkHTTP   = "hark_http"
 	ProviderMock       = "mock"
 )
 
 type Config struct {
-	Provider string `json:"provider"` // "volcengine" | "openai" | "hark_http" | "mock"
+	Provider string `json:"provider"` // "volcengine" | "dashscope" | "openai" | "hark_http" | "mock"
 	BaseURL  string `json:"base_url"`
 	APIKey   string `json:"api_key,omitempty"`
 	AppID    string `json:"app_id,omitempty"` // 火山旧版控制台可选 AppID；新版控制台单 APIKey 留空即可
@@ -50,7 +51,7 @@ func Presets() []Preset {
 		{ID: "siliconflow", Label: "硅基流动", Provider: ProviderOpenAI, BaseURL: "https://api.siliconflow.cn/v1", DefaultMod: "FunAudioLLM/SenseVoiceSmall", NeedsAPIKey: true},
 		{ID: "groq", Label: "Groq", Provider: ProviderOpenAI, BaseURL: "https://api.groq.com/openai/v1", DefaultMod: "whisper-large-v3-turbo", NeedsAPIKey: true},
 		{ID: "openai", Label: "OpenAI", Provider: ProviderOpenAI, BaseURL: "https://api.openai.com/v1", DefaultMod: "whisper-1", NeedsAPIKey: true},
-		{ID: "dashscope", Label: "阿里云百炼", Provider: ProviderOpenAI, BaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", DefaultMod: "paraformer-realtime-v2", NeedsAPIKey: true},
+		{ID: "dashscope", Label: "阿里云百炼", Provider: ProviderDashScope, BaseURL: DefaultDashScopeURL, DefaultMod: DefaultDashScopeModel, NeedsAPIKey: true},
 		{ID: "local_whisper", Label: "本地 faster-whisper", Provider: ProviderOpenAI, BaseURL: "http://127.0.0.1:8000/v1", DefaultMod: "Systran/faster-whisper-large-v3", NeedsAPIKey: false},
 	}
 }
@@ -148,6 +149,12 @@ func NormalizeConfig(c Config) Config {
 			c.Model = DefaultVolcResourceID
 		}
 	}
+	if c.Provider == ProviderDashScope {
+		c.BaseURL = normalizeDashScopeURL(c.BaseURL)
+		if c.Model == "" {
+			c.Model = DefaultDashScopeModel
+		}
+	}
 	return c
 }
 
@@ -161,6 +168,11 @@ func ValidateConfig(c Config) error {
 			return errors.New("请填写豆包语音控制台签发的 API Key")
 		}
 		return nil
+	case ProviderDashScope:
+		if c.APIKey == "" {
+			return errors.New("请填写阿里云百炼控制台签发的 API Key")
+		}
+		return validateDashScopeURL(c.BaseURL)
 	case ProviderOpenAI:
 		if c.BaseURL == "" {
 			return errors.New("请填写 OpenAI 兼容接口的 Base URL")
@@ -179,7 +191,7 @@ func ValidateConfig(c Config) error {
 	}
 }
 
-// CheckHealth 供后台 15 秒心跳调用；OpenAI 接口只做静态配置检查，绝不轮询消耗用户配额。
+// CheckHealth 供后台 15 秒心跳调用；云端 ASR 只做静态配置检查，不轮询消耗用户配额。
 func CheckHealth(ctx context.Context, cfg Config) (bool, *string) {
 	cfg = NormalizeConfig(cfg)
 	if err := ValidateConfig(cfg); err != nil {
@@ -192,7 +204,7 @@ func CheckHealth(ctx context.Context, cfg Config) (bool, *string) {
 	case ProviderVolcengine:
 		m := "豆包大模型 (" + cfg.Model + ")"
 		return true, &m
-	case ProviderOpenAI:
+	case ProviderOpenAI, ProviderDashScope:
 		m := cfg.Model
 		return true, &m
 	case ProviderHarkHTTP:
@@ -253,6 +265,8 @@ func Transcribe(ctx context.Context, cfg Config, opus []byte, name string) (Resu
 		}
 	case ProviderVolcengine:
 		res, err = transcribeVolcengine(ctx, cfg, opus)
+	case ProviderDashScope:
+		res, err = transcribeDashScope(ctx, cfg, opus)
 	case ProviderOpenAI:
 		res, err = transcribeOpenAI(ctx, cfg, opus, name)
 	case ProviderHarkHTTP:

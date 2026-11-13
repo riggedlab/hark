@@ -1,6 +1,6 @@
 # ASR 语音转写接入与本地部署指南
 
-Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置了 **3 种语音转写接入方式**，不在主仓库捆绑特定 Python 环境或大模型权重：
+Hark 桌面端（`desktop/`）、无界面 Worker（`cmd/hark-worker/`）与安卓手机直连支持 **4 种语音转写接入方式**，不在主仓库捆绑特定 Python 环境或大模型权重：
 
 ---
 
@@ -16,7 +16,29 @@ Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置�
 
 ---
 
-## 方式二：OpenAI 兼容接口（通用三方 API，填 Key 即用）
+## 方式二：阿里云百炼（DashScope 原生接口）
+
+1. 打开 [百炼控制台](https://bailian.console.aliyun.com/)（新加坡地域使用 [Model Studio 控制台](https://modelstudio.console.alibabacloud.com/)），开通模型服务，确认所选地域可以调用 `qwen-audio-3.1-asr-flash`。
+2. 在「API Key 管理」创建并复制 Key。Key 与接口地址必须属于同一地域。
+3. 桌面端「ASR 接入」或安卓「转写与同步设置 → 手机直连转写」选择 **阿里云百炼**，粘贴 Key；模型默认 `qwen-audio-3.1-asr-flash`，点「测试连接」/「测试并启用」。测试会发送内置语音并产生一次实际模型调用；Worker 后台健康检查仅校验配置，不耗配额。
+
+| 配置项 | 填写值 |
+|---|---|
+| `provider` | `dashscope` |
+| `base_url`（北京，默认） | `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` |
+| `base_url`（新加坡） | `https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` |
+| `model` | `qwen-audio-3.1-asr-flash` |
+| `api_key` | 所选地域的百炼 API Key |
+
+地址只填带 `https://` 的域名时会自动补全原生接口路径。百炼现推荐工作空间专属域名：北京 `https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com`，新加坡 `https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com`；可直接填入控制台提供的域名或完整接口 URL。
+
+直接以 `data:audio/ogg;base64,...` 发送原始 Ogg Opus，`parameters.format` 为 `opus`，无需转码或对象存储。[HTTP API](https://www.alibabacloud.com/help/en/model-studio/qwen-audio-asr-http-api) 支持 `opus`；[音频规格（Usage limits）](https://www.alibabacloud.com/help/en/model-studio/non-realtime-speech-recognition-user-guide#usage-limits) 列明本模型支持 URL / Base64、`ogg` / `opus`、任意采样率，**单次一个文件，最大 2 GB、最长 5 分钟**。Base64 会增加请求体大小；文档未单列 Base64 请求体上限。`audio/ogg` 是 [RFC 7845 §9](https://www.rfc-editor.org/rfc/rfc7845#section-9) 推荐的 Ogg Opus MIME；百炼文档未给出 Opus 专用的 Data URI 示例，该组合仍需真实 Key 验证。
+
+默认开启 `speaker_diarization_enabled`，将 `speaker_id` 用作单段说话人标签；此时不发送 `language_hints` / `keep_dialect`。若服务明确拒绝说话人分离参数，自动关闭后重试一次；没有分段但有全文时合成整段。静音或成功的空结果正常归档为空文本；兼容通用静音码 `Audio.AudioSilentError`（[错误码文档](https://help.aliyun.com/en/model-studio/error-code) 目前仅在 CosyVoice 条目解释此码，本模型的具体静音返回未说明）。单段分人不提供跨录音声纹向量。
+
+---
+
+## 方式三：OpenAI 兼容接口（通用三方 API，填 Key 即用）
 
 支持所有兼容 `POST {BaseURL}/v1/audio/transcriptions` 的云端或本地服务。Hark 会自动把 `.opus` 封装重命名为 `.ogg` 上传，并在模型不支持 `verbose_json` 时自动回退为 `json`、从本地 Ogg 页尾计算精确时长。
 
@@ -25,14 +47,13 @@ Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置�
 | **硅基流动 SiliconFlow** | `https://api.siliconflow.cn/v1` | `FunAudioLLM/SenseVoiceSmall` | 中文口语速度快、成本低 |
 | **Groq** | `https://api.groq.com/openai/v1` | `whisper-large-v3-turbo` | 响应极快，支持分段时间戳 |
 | **OpenAI** | `https://api.openai.com/v1` | `whisper-1` | 通用多语种与分段时间戳稳定 |
-| **阿里云百炼** | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `paraformer-realtime-v2` | 中文专有名词表现好 |
 | **本地 faster-whisper** | `http://127.0.0.1:8000/v1` | `Systran/faster-whisper-large-v3` | 本地离线 Docker 一键部署 |
 
 > **能力自适应说明**：三方 OpenAI 兼容接口通常只返回文字和分段时间戳、不返回声纹向量。Hark 检测到响应无声纹时，**自动跳过跨录音认人**，仅按时间线存档分段文字，不会报错或卡住同步。
 
 ---
 
-## 方式三：Hark 本地增强接口（带声纹跨录音认人）
+## 方式四：Hark 本地增强接口（带声纹跨录音认人）
 
 如果你希望在 Mac / 本地工作站离线转写，并自动区分「谁说了哪句话」、在手机端给人物改名与合并，可以自建一个最小 HTTP 服务，在 Hark 桌面端选择 **「Hark 增强接口 (声纹)」** 并填入地址（如 `http://127.0.0.1:8765`）。
 
@@ -99,4 +120,4 @@ Hark 桌面端（`desktop/`）与无界面 Worker（`cmd/hark-worker/`）内置�
 }
 ```
 
-`provider` 可选 `volcengine`、`openai`、`hark_http`，各自的 `base_url` 和 `model` 怎么填，见上文对应的方式。配置文件里有密钥，记得 `chmod 600`。
+`provider` 可选 `volcengine`、`dashscope`、`openai`、`hark_http`（另有仅供测试的 `mock`），各自的 `base_url` 和 `model` 怎么填，见上文对应的方式。配置文件里有密钥，记得 `chmod 600`。

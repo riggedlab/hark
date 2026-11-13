@@ -176,7 +176,7 @@ internal object Voiceprint {
             val trFile = File(Transcripts.dir(ctx), "$name.json")
             val rawRoot = runCatching { JSONObject(trFile.readText()) }.getOrNull() ?: continue
             val engine = rawRoot.optString("engine")
-            if (engine == "volcengine" || engine == "openai") continue
+            if (engine == "volcengine" || engine == "openai" || engine == "dashscope") continue
             val segArr = rawRoot.optJSONArray("segments") ?: continue
 
             var pcm: FloatArray? = null
@@ -551,7 +551,7 @@ internal object Voiceprint {
         }
 
         val engine = root.optString("engine")
-        val isPhoneDirect = engine == "volcengine" || engine == "openai"
+        val isPhoneDirect = engine == "volcengine" || engine == "openai" || engine == "dashscope"
 
         if (!isPhoneDirect) {
             val hasMacGlobal = (0 until segArr.length()).any { i ->

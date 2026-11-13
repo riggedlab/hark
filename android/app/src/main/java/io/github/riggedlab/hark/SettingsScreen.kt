@@ -114,7 +114,7 @@ internal fun SettingsScreen(
     var showGuide by remember(provider) {
         mutableStateOf(
             when (provider) {
-                AsrProvider.VOLCENGINE, AsrProvider.OPENAI -> initAsr.apiKey.isBlank()
+                AsrProvider.VOLCENGINE, AsrProvider.DASHSCOPE, AsrProvider.OPENAI -> initAsr.apiKey.isBlank()
                 AsrProvider.HARK_HTTP -> initAsr.baseUrl.isBlank()
             },
         )
@@ -234,7 +234,7 @@ internal fun SettingsScreen(
                     ) {
                         ModeOptionTile(
                             title = "手机直连转写",
-                            desc = "豆包 / OpenAI 出字 + 本机声纹认人",
+                            desc = "豆包 / 百炼 / OpenAI 出字 + 本机声纹认人",
                             selected = selectedMode == WorkMode.DIRECT_ASR,
                             active = committedMode == WorkMode.DIRECT_ASR,
                             modifier = Modifier.weight(1f),
@@ -359,7 +359,9 @@ internal fun SettingsScreen(
                             onToggleSecret = { showAsrSecret = !showAsrSecret },
                             onToggleGuide = { showGuide = !showGuide },
                             onToggleVolcAdv = { showVolcAdv = !showVolcAdv },
-                            onOpenConsole = { onOpenUrl("https://console.volcengine.com/speech/new/setting/activate") },
+                            onOpenConsole = {
+                                onOpenUrl(if (provider == AsrProvider.DASHSCOPE) "https://bailian.console.aliyun.com/" else "https://console.volcengine.com/speech/new/setting/activate")
+                            },
                             onProbeAndEnable = {
                                 focusManager.clearFocus()
                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -713,9 +715,11 @@ private fun DirectAsrConfigCard(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             // 服务商切换条（方角机械按键感）
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                maxItemsInEachRow = 2,
             ) {
                 AsrProvider.entries.forEach { p ->
                     val selected = provider == p
@@ -755,10 +759,10 @@ private fun DirectAsrConfigCard(
                 ) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         when (provider) {
-                            AsrProvider.VOLCENGINE -> {
+                            AsrProvider.VOLCENGINE, AsrProvider.DASHSCOPE -> {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(
-                                        "豆包语音 3 步配置",
+                                        if (provider == AsrProvider.DASHSCOPE) "阿里云百炼 3 步配置" else "豆包语音 3 步配置",
                                         style = MaterialTheme.typography.labelLarge,
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.weight(1f),
@@ -773,8 +777,13 @@ private fun DirectAsrConfigCard(
                                             .padding(horizontal = 4.dp, vertical = 2.dp),
                                     )
                                 }
-                                GuideStep("1", "进入「开通管理 → 录音文件识别」，开通「大模型录音文件极速版」（勿选流式或异步标准版）")
-                                GuideStep("2", "在左侧「API Key 管理」新建一把 Key 并复制（注意与火山方舟 Key 不通用）")
+                                if (provider == AsrProvider.DASHSCOPE) {
+                                    GuideStep("1", "打开百炼控制台，选择北京或新加坡地域，开通 qwen-audio-3.1-asr-flash")
+                                    GuideStep("2", "在「API Key 管理」创建 Key；新加坡需将接口域名改为 dashscope-intl.aliyuncs.com，或使用控制台的工作空间域名")
+                                } else {
+                                    GuideStep("1", "进入「开通管理 → 录音文件识别」，开通「大模型录音文件极速版」（勿选流式或异步标准版）")
+                                    GuideStep("2", "在左侧「API Key 管理」新建一把 Key 并复制（注意与火山方舟 Key 不通用）")
+                                }
                                 GuideStep("3", "点下方输入框右侧「粘贴」，再点「测试并启用」即可")
                             }
                             AsrProvider.OPENAI -> {
@@ -869,6 +878,43 @@ private fun DirectAsrConfigCard(
                                     )
                                 }
                             }
+                        }
+
+                        AsrProvider.DASHSCOPE -> {
+                            SecretOrUrlField(
+                                value = asrKey,
+                                onValueChange = onKeyChange,
+                                label = "阿里云百炼 API Key",
+                                placeholder = "粘贴百炼控制台创建的 API Key",
+                                isSecret = true,
+                                showSecret = showSecret,
+                                onToggleSecret = onToggleSecret,
+                                onPaste = onPasteKey,
+                                imeAction = ImeAction.Next,
+                                onNext = { focusManager.moveFocus(FocusDirection.Down) },
+                            )
+                            OutlinedTextField(
+                                value = asrModel,
+                                onValueChange = onModelChange,
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("模型名称") },
+                                placeholder = { Text(AsrProvider.DASHSCOPE.defaultModel) },
+                                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Next),
+                            )
+                            SecretOrUrlField(
+                                value = asrUrl,
+                                onValueChange = onUrlChange,
+                                label = "原生接口地址（需与 Key 地域一致）",
+                                placeholder = AsrProvider.DASHSCOPE.defaultUrl,
+                                isSecret = false,
+                                showSecret = true,
+                                onToggleSecret = {},
+                                onPaste = onPasteUrl,
+                                imeAction = ImeAction.Done,
+                                onDone = { focusManager.clearFocus() },
+                            )
+                            Text("直接发送 Ogg Opus，单段最长 5 分钟；支持分句时间戳和单段内说话人分离。", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         }
 
                         AsrProvider.OPENAI -> {

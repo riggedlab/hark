@@ -4,6 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
@@ -26,7 +27,7 @@ data class AsrProbeReport(
 )
 
 /**
- * 手机本机直连 ASR 客户端：支持豆包语音大模型极速版、OpenAI 兼容接口与自建 Hark HTTP。
+ * 手机本机直连 ASR 客户端：支持豆包语音大模型极速版、百炼原生接口、OpenAI 兼容接口与自建 Hark HTTP。
  * 输出格式与云端回传的 texts/<name>.json 完全一致，单段说话人统一映射为局部 other_1 / other_2，
  * 切回云端信箱模式时与电脑端声纹名册互不污染。
  */
@@ -77,6 +78,7 @@ object PhoneAsr {
         cfg.validationError()?.let { throw IllegalArgumentException(it) }
         return when (cfg.provider) {
             AsrProvider.VOLCENGINE -> transcribeVolcengine(cfg, name, opus, timeoutMs)
+            AsrProvider.DASHSCOPE -> transcribeDashScope(cfg, name, opus, timeoutMs)
             AsrProvider.OPENAI -> transcribeOpenAI(cfg, name, opus, timeoutMs)
             AsrProvider.HARK_HTTP -> transcribeHarkHttp(cfg, name, opus, timeoutMs)
         }
@@ -270,6 +272,106 @@ object PhoneAsr {
             if (!v.isNullOrEmpty()) return v
         }
         return null
+    }
+
+    // 阿里云百炼原生 HTTP 接口。
+    private fun transcribeDashScope(cfg: AsrConfig, name: String, opus: ByteArray, timeoutMs: Int): JSONObject {
+        // HTTP API format=opus; RFC 7845 §9 specifies audio/ogg for Ogg Opus.
+        val audio = "data:audio/ogg;base64," + Base64.getEncoder().encodeToString(opus)
+        val localDur = oggDurationSec(opus)
+
+        fun sendOnce(enableSpeaker: Boolean): Pair<Int, String> {
+            val content = JSONObject().put("type", "input_audio").put("input_audio", JSONObject().put("data", audio))
+            val message = JSONObject().put("role", "user").put("content", JSONArray().put(content))
+            val body = JSONObject()
+                .put("model", cfg.model)
+                .put("input", JSONObject().put("messages", JSONArray().put(message)))
+                // language_hints and keep_dialect must not accompany diarization.
+                .put("parameters", JSONObject().put("format", "opus").put("speaker_diarization_enabled", enableSpeaker))
+                .toString().toByteArray(Charsets.UTF_8)
+            val conn = (URL(cfg.baseUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = timeoutMs
+                doOutput = true
+                setFixedLengthStreamingMode(body.size)
+                setRequestProperty("Authorization", "Bearer ${cfg.apiKey}")
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("X-DashScope-SSE", "disable")
+            }
+            return try {
+                conn.outputStream.use { it.write(body) }
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                code to stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            } finally {
+                conn.disconnect()
+            }
+        }
+
+        var enableSpeaker = true
+        val backoffs = longArrayOf(800L, 2_000L) // Same retry budget as Volcengine.
+        var retries = 0
+        while (true) {
+            val response = try {
+                sendOnce(enableSpeaker)
+            } catch (e: IOException) {
+                if (retries >= backoffs.size || Thread.currentThread().isInterrupted) throw e
+                Thread.sleep(backoffs[retries++])
+                continue
+            }
+            val (httpCode, raw) = response
+            val data = runCatching { JSONObject(raw) }.getOrNull()
+            val apiCode = data?.optString("code").orEmpty()
+            val apiMsg = data?.optString("message").orEmpty()
+            if (httpCode == 401 || httpCode == 403 || apiCode.equals("InvalidApiKey", true) || apiCode.equals("invalid_api_key", true) ||
+                apiCode.startsWith("AccessDenied") || apiCode.endsWith(".AccessDenied")
+            ) {
+                throw PhoneAsrException(
+                    AsrFailureKind.AUTH_OR_CONFIG,
+                    "百炼鉴权失败 (HTTP $httpCode $apiCode)：请检查百炼 API Key、所属地域与接口地址是否匹配，并确认已开通模型 ${cfg.model}",
+                )
+            }
+            if (apiCode == "Audio.AudioSilentError") {
+                return buildTranscriptJson(name, localDur, "", cfg.provider.id, cfg.model, emptyList())
+            }
+            val parameterError = httpCode == 400 || httpCode == 422 || apiCode.startsWith("InvalidParameter") || apiCode == "UnsupportedParameter"
+            if (enableSpeaker && parameterError && apiMsg.contains("diarization", ignoreCase = true)) {
+                enableSpeaker = false
+                continue
+            }
+            if ((httpCode == 429 || httpCode >= 500) && retries < backoffs.size) {
+                Thread.sleep(backoffs[retries++])
+                continue
+            }
+            if (httpCode !in 200..299 || apiCode.isNotEmpty()) {
+                val kind = when {
+                    httpCode == 429 || httpCode >= 500 -> AsrFailureKind.TRANSIENT
+                    apiCode.startsWith("Audio.") || httpCode in listOf(413, 415) -> AsrFailureKind.BAD_AUDIO
+                    else -> classifyClientError("$apiCode $apiMsg")
+                }
+                throw PhoneAsrException(kind, "百炼返回 HTTP $httpCode ($apiCode, request_id=${data?.optString("request_id").orEmpty()}): ${apiMsg.take(200)}")
+            }
+            if (data == null) throw PhoneAsrException(AsrFailureKind.TRANSIENT, "解析百炼响应失败")
+            val output = data.optJSONObject("output") ?: JSONObject()
+            val durS = data.optJSONObject("usage")?.optDouble("duration", 0.0)?.takeIf { it > 0 } ?: localDur
+            val sentences = output.optJSONArray("sentences") ?: JSONArray()
+            val items = if (sentences.length() > 0) sentences else JSONArray().apply {
+                output.optJSONObject("sentence")?.let { put(it) }
+            }
+            val segs = ArrayList<RawSeg>(items.length())
+            for (i in 0 until items.length()) {
+                val s = items.getJSONObject(i)
+                val txt = s.optString("text").trim()
+                if (txt.isEmpty()) continue
+                val speaker = s.opt("speaker_id")?.takeUnless { it == JSONObject.NULL }?.toString()?.trim()?.ifEmpty { null }
+                segs.add(RawSeg(s.optDouble("begin_time", 0.0) / 1000, s.optDouble("end_time", 0.0) / 1000, txt, speaker))
+            }
+            val fullText = output.optString("text").trim()
+            // A single output.sentence may only contain the last sentence of output.text.
+            if (sentences.length() == 0 && fullText.isNotEmpty() && segs.joinToString("") { it.text } != fullText) segs.clear()
+            return buildTranscriptJson(name, durS, fullText, cfg.provider.id, cfg.model, segs)
+        }
     }
 
     // ─────────────────── 2. OpenAI 兼容接口 (/v1/audio/transcriptions) ───────────────────

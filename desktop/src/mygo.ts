@@ -50,7 +50,7 @@ export interface ArchiveStats {
 }
 
 export interface AsrConfig {
-  /** "volcengine" | "openai" | "hark_http" | "mock" */
+  /** "volcengine" | "dashscope" | "openai" | "hark_http" | "mock" */
   provider: string;
   base_url: string;
   api_key?: string;
