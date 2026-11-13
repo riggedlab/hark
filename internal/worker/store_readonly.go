@@ -249,14 +249,32 @@ func (s *Store) ListSpeakers() ([]SpeakerInfo, error) {
 	return s.listSpeakersLocked()
 }
 
-const transcriptColumns = `name, COALESCE(started_at, ''), COALESCE(duration_s, 0),
-	COALESCE(speech_s, 0), COALESCE(engine, ''), COALESCE(model, ''),
-	COALESCE(text, ''), COALESCE(segments, '[]')`
+func (s *Store) transcriptColumnsLocked() string {
+	hasSceneCol := false
+	if rows, err := s.db.Query(`PRAGMA table_info(transcripts)`); err == nil {
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, ctype string
+			var dflt sql.NullString
+			if rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk) == nil && name == "scene_tags_json" {
+				hasSceneCol = true
+			}
+		}
+		rows.Close()
+	}
+	sceneExpr := `'[]'`
+	if hasSceneCol {
+		sceneExpr = `COALESCE(scene_tags_json, '[]')`
+	}
+	return `name, COALESCE(started_at, ''), COALESCE(duration_s, 0),
+		COALESCE(speech_s, 0), COALESCE(engine, ''), COALESCE(model, ''),
+		COALESCE(text, ''), COALESCE(segments, '[]'), ` + sceneExpr
+}
 
 func scanTranscript(row interface{ Scan(...any) error }, spkMap map[string]SpeakerBadge) (TranscriptDetail, error) {
 	var d TranscriptDetail
-	var raw string
-	err := row.Scan(&d.Name, &d.StartedAt, &d.DurationS, &d.SpeechS, &d.Engine, &d.Model, &d.Text, &raw)
+	var raw, rawScenes string
+	err := row.Scan(&d.Name, &d.StartedAt, &d.DurationS, &d.SpeechS, &d.Engine, &d.Model, &d.Text, &raw, &rawScenes)
 	if err != nil {
 		return d, err
 	}
@@ -264,9 +282,18 @@ func scanTranscript(row interface{ Scan(...any) error }, spkMap map[string]Speak
 	if err := json.Unmarshal([]byte(raw), &segs); err != nil && raw != "" {
 		return d, fmt.Errorf("录音 %s 的 segments 无法解析: %w", d.Name, err)
 	}
+	if rawScenes != "" {
+		_ = json.Unmarshal([]byte(rawScenes), &d.SceneTags)
+	}
 	d.Segments = make([]ResolvedSegment, 0, len(segs))
 	for _, seg := range segs {
-		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text, DB: seg.DB, ActiveS: seg.ActiveS}
+		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text, DB: seg.DB, ActiveS: seg.ActiveS, MoodScore: seg.MoodScore}
+		if seg.Mood != nil {
+			rs.Mood = *seg.Mood
+		}
+		if seg.VocalTag != nil {
+			rs.VocalTag = *seg.VocalTag
+		}
 		if seg.Speaker != nil && *seg.Speaker != "" {
 			badge, ok := spkMap[*seg.Speaker]
 			if !ok {
@@ -298,7 +325,7 @@ func (s *Store) readArchiveLocked(f ArchiveFilter) ([]TranscriptDetail, int, map
 	if f.Offset < 0 {
 		f.Offset = 0
 	}
-	rows, err := s.db.Query(`SELECT `+transcriptColumns+` FROM transcripts`+where+
+	rows, err := s.db.Query(`SELECT `+s.transcriptColumnsLocked()+` FROM transcripts`+where+
 		` ORDER BY name DESC LIMIT ? OFFSET ?`, append(args, f.Limit, f.Offset)...)
 	if err != nil {
 		return nil, 0, nil, err

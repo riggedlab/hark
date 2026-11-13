@@ -532,13 +532,27 @@ func writeTranscript(w io.Writer, d worker.TranscriptDetail, segments []worker.R
 	if end != "" {
 		fmt.Fprintf(w, " → %s", end)
 	}
-	fmt.Fprintf(w, " | %.1fs（语音 %.1fs）\n", d.DurationS, d.SpeechS)
-	for _, seg := range segments {
-		if seg.DB != nil {
-			fmt.Fprintf(w, "- [%s–%s | %.1fdB] ", segmentTime(seg.Start), segmentTime(seg.End), *seg.DB)
-		} else {
-			fmt.Fprintf(w, "- [%s–%s] ", segmentTime(seg.Start), segmentTime(seg.End))
+	fmt.Fprintf(w, " | %.1fs（语音 %.1fs）", d.DurationS, d.SpeechS)
+	if len(d.SceneTags) > 0 {
+		parts := make([]string, 0, len(d.SceneTags))
+		for _, t := range d.SceneTags {
+			parts = append(parts, fmt.Sprintf("%s %.2f", t.Label, t.Score))
 		}
+		fmt.Fprintf(w, " | 环境: %s", strings.Join(parts, " · "))
+	}
+	fmt.Fprintln(w)
+	for _, seg := range segments {
+		meta := fmt.Sprintf("%s–%s", segmentTime(seg.Start), segmentTime(seg.End))
+		if seg.DB != nil {
+			meta += fmt.Sprintf(" | %.1fdB", *seg.DB)
+		}
+		if seg.Mood != "" && seg.MoodScore != nil {
+			meta += fmt.Sprintf(" | %s %+.2f", seg.Mood, *seg.MoodScore)
+		}
+		if seg.VocalTag != "" {
+			meta += " · " + seg.VocalTag
+		}
+		fmt.Fprintf(w, "- [%s] ", meta)
 		if seg.SpeakerLabel != "" {
 			fmt.Fprintf(w, "%s (%s): ", seg.SpeakerLabel, seg.SpeakerID)
 		}

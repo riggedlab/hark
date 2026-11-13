@@ -184,4 +184,48 @@ internal object KaldiFbank {
         }
         return numFrames to out
     }
+
+    /** 计算 512 点加窗信号的功率谱前 257 个频点（0..Nyquist，供 CED-Tiny 64 维梅尔谱复用） */
+    internal fun fftPowerSpectrum257(
+        windowed512: FloatArray,
+        re: FloatArray,
+        im: FloatArray,
+        power257: FloatArray,
+    ) {
+        im.fill(0f)
+        for (i in 0 until FFT_N) {
+            re[bitRev[i]] = windowed512[i]
+        }
+        var len = 2
+        while (len <= FFT_N) {
+            val half = len ushr 1
+            val step = FFT_N / len
+            var base = 0
+            while (base < FFT_N) {
+                var k = 0
+                var tw = 0
+                while (k < half) {
+                    val i1 = base + k
+                    val i2 = i1 + half
+                    val wr = cosTable[tw]
+                    val wi = sinTable[tw]
+                    val tr = wr * re[i2] - wi * im[i2]
+                    val ti = wr * im[i2] + wi * re[i2]
+                    re[i2] = re[i1] - tr
+                    im[i2] = im[i1] - ti
+                    re[i1] += tr
+                    im[i1] += ti
+                    k++
+                    tw += step
+                }
+                base += len
+            }
+            len = len shl 1
+        }
+        for (k in 0..HALF_FFT) {
+            val r = re[k]
+            val ii = im[k]
+            power257[k] = r * r + ii * ii
+        }
+    }
 }

@@ -71,26 +71,36 @@ type WorkerStatus struct {
 	PhaseElapsedS float64 `json:"phase_elapsed_s"`
 }
 
+// SceneTag 环境音与副语言事件标签（由端侧 CED-Tiny 离线识别）。
+type SceneTag struct {
+	Label string  `json:"label"`
+	Score float64 `json:"score"`
+}
+
 // Segment 转写文本单段结构（与 Android Transcripts.kt 保持一致）。
 type Segment struct {
-	Start   float64  `json:"start"`
-	End     float64  `json:"end"`
-	Text    string   `json:"text"`
-	Speaker *string  `json:"speaker"`
-	DB      *float64 `json:"db,omitempty"`
-	ActiveS *float64 `json:"act_s,omitempty"`
+	Start     float64  `json:"start"`
+	End       float64  `json:"end"`
+	Text      string   `json:"text"`
+	Speaker   *string  `json:"speaker"`
+	DB        *float64 `json:"db,omitempty"`
+	ActiveS   *float64 `json:"act_s,omitempty"`
+	Mood      *string  `json:"mood,omitempty"`
+	MoodScore *float64 `json:"mood_score,omitempty"`
+	VocalTag  *string  `json:"vocal_tag,omitempty"`
 }
 
 // TranscriptPayload 加密写入 /v2/outbox/{item_id} 的转写结果。
 type TranscriptPayload struct {
-	Name      string    `json:"name"`
-	StartedAt string    `json:"started_at"`
-	DurationS float64   `json:"duration_s"`
-	SpeechS   float64   `json:"speech_s"`
-	Engine    string    `json:"engine"`
-	Model     string    `json:"model"`
-	Text      string    `json:"text"`
-	Segments  []Segment `json:"segments"`
+	Name      string     `json:"name"`
+	StartedAt string     `json:"started_at"`
+	DurationS float64    `json:"duration_s"`
+	SpeechS   float64    `json:"speech_s"`
+	Engine    string     `json:"engine"`
+	Model     string     `json:"model"`
+	Text      string     `json:"text"`
+	Segments  []Segment  `json:"segments"`
+	SceneTags []SceneTag `json:"scene_tags,omitempty"`
 }
 
 // MacSpeakerItem Worker 加密写入 slot:speakers_mac 的单个人物初始样本。

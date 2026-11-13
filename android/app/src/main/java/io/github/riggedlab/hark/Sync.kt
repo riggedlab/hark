@@ -88,7 +88,7 @@ object Sync {
                 val result = JSONObject(request(cfg, "/v2/poll?$query", wait))
                 val texts = result.getJSONArray("new_texts")
                 var after = if (result.optBoolean("cursor_reset", false)) 0L else p.getLong("after_seq", 0)
-                // 一批全部认证并落盘后才推进游标；中途失败，下次重放本批即可
+                // 一批全部认证并落盘后才推进游标；先快速保存文字，环境音与心情交由独立后台协程异步补齐，绝不阻塞同步批次
                 for (i in 0 until texts.length()) {
                     val item = texts.getJSONObject(i)
                     val text = decode(cfg, item, "text:${item.getString("id")}")
@@ -96,12 +96,11 @@ object Sync {
                     require(Crypto.audioName.matches(name) && Crypto.itemId(cfg.e2eeKey, name) == item.getString("id")) {
                         "转写文件名或条目 ID 不匹配"
                     }
-                    val localOpus = File(RecorderService.chunkDir(ctx), name)
-                    val enrichedText = if (localOpus.exists()) {
-                        Voiceprint.annotateLoudnessIfMissing(localOpus, text)
-                    } else text
-                    Transcripts.save(ctx, enrichedText)
+                    Transcripts.save(ctx, text)
                     after = maxOf(after, item.getLong("seq"))
+                }
+                if (texts.length() > 0) {
+                    SceneAndMood.scheduleBackgroundScan(ctx)
                 }
                 val slots = result.getJSONObject("slots")
                 for (slot in listOf("speakers_mac", "speakers_phone")) {

@@ -39,10 +39,15 @@ class Uploader(private val ctx: Context) {
         return MarkSnapshot(uploaded = up, silent = sil, badAudio = bad, unuploadedCount = unuploaded)
     }
 
-    /** 按当前工作模式处理待办片段，返回 (本次完成数, 剩余待处理数) */
-    fun processPending(): Pair<Int, Int> = when (Config.mode(ctx)) {
-        WorkMode.CLOUD -> uploadPending()
-        WorkMode.DIRECT_ASR -> transcribePendingLocally()
+    /** 按当前工作模式处理待办片段，并异步触发与 ASR 解耦的本地环境音/心情扫描 */
+    fun processPending(): Pair<Int, Int> {
+        SceneAndMood.scheduleBackgroundScan(ctx)
+        val res = when (Config.mode(ctx)) {
+            WorkMode.CLOUD -> uploadPending()
+            WorkMode.DIRECT_ASR -> transcribePendingLocally()
+        }
+        SceneAndMood.scheduleBackgroundScan(ctx)
+        return res
     }
 
     fun hasPendingWork(): Boolean = when (Config.mode(ctx)) {
@@ -98,6 +103,7 @@ class Uploader(private val ctx: Context) {
                     val rawJson = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
                     val enriched = Voiceprint.enrichTranscript(ctx, f, rawJson)
                     Transcripts.save(ctx, enriched)
+                    SceneAndMood.scheduleBackgroundScan(ctx)
                 }.onSuccess {
                 ok++
                 badFileFailures.remove(f.name)

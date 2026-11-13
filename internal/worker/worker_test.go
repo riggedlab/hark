@@ -241,6 +241,61 @@ func TestKeychainFallbackNeverUsesStaleSecretAndUnlimitedExport(t *testing.T) {
 	}
 }
 
+func TestSceneTagsAndMoodPersistAndQueryRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mood := "positive"
+	score := 0.68
+	vocal := "笑声"
+	spk := "spk_001"
+	payload := protocol.TranscriptPayload{
+		Name:      "20261113-140000.opus",
+		StartedAt: "2026-11-13T14:00:00",
+		DurationS: 12.0,
+		SpeechS:   8.5,
+		Engine:    "volcengine",
+		Model:     "auc_turbo",
+		Text:      "这个改动体验特别顺畅！",
+		SceneTags: []protocol.SceneTag{{Label: "敲键盘", Score: 0.82}, {Label: "笑声", Score: 0.64}},
+		Segments: []protocol.Segment{
+			{
+				Start:     0.5,
+				End:       9.0,
+				Text:      "这个改动体验特别顺畅！",
+				Speaker:   &spk,
+				Mood:      &mood,
+				MoodScore: &score,
+				VocalTag:  &vocal,
+			},
+		},
+	}
+	if err := store.SaveTranscript(payload); err != nil {
+		t.Fatal(err)
+	}
+
+	ro, exists, err := OpenReadOnlyStore(dir)
+	if err != nil || !exists {
+		t.Fatalf("OpenReadOnlyStore failed: exists=%v err=%v", exists, err)
+	}
+	defer ro.Close()
+
+	detail, err := ro.GetDetail(payload.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.SceneTags) != 2 || detail.SceneTags[0].Label != "敲键盘" {
+		t.Fatalf("unexpected SceneTags: %+v", detail.SceneTags)
+	}
+	if len(detail.Segments) != 1 || detail.Segments[0].Mood != "positive" || detail.Segments[0].VocalTag != "笑声" {
+		t.Fatalf("unexpected Segment mood: %+v", detail.Segments)
+	}
+}
+
 func pad6(n int) string {
 	s := "000000" + string([]byte{
 		byte('0' + (n/100000)%10),

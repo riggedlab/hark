@@ -133,8 +133,9 @@ internal object Voiceprint {
         true
     }
 
-    /** 触发非阻塞后台自举与近期直连录音修正（在 uploadLock 之外异步运行，绝不阻塞实时新录音转写） */
+    /** 触发非阻塞后台声纹自举与全量环境音/心情扫描（在 uploadLock 之外异步运行，绝不阻塞实时新录音转写） */
     fun triggerBackgroundBootstrap(ctx: Context) {
+        SceneAndMood.scheduleBackgroundScan(ctx)
         if (bootstrapDone || !bootstrapRunning.compareAndSet(false, true)) return
         val appCtx = ctx.applicationContext
         bgScope.launch {
@@ -143,6 +144,7 @@ internal object Voiceprint {
                     AppState.update { it.copy(textVersion = it.textVersion + 1) }
                 }
                 bootstrapDone = true
+                SceneAndMood.scheduleBackgroundScan(appCtx)
             } finally {
                 bootstrapRunning.set(false)
             }
@@ -245,20 +247,30 @@ internal object Voiceprint {
             var changed = bootstrapKnownSpeakersFromHistory(ctx)
             val chunkDir = RecorderService.chunkDir(ctx)
 
-            val recentNames = Transcripts.allNames(ctx).sortedDescending().take(18)
-            for (name in recentNames) {
+            val allSorted = Transcripts.allNames(ctx).sortedDescending()
+            var batchChanged = 0
+
+            for (name in allSorted) {
                 val opus = File(chunkDir, name)
                 if (!opus.exists()) continue
                 val trFile = File(Transcripts.dir(ctx), "$name.json")
                 if (!trFile.exists()) continue
-                val rawJson = runCatching { JSONObject(trFile.readText()) }.getOrNull() ?: continue
-                if (rawJson.optInt("vp_ver", 0) >= SCHEMA_VERSION) continue
-                val segs = rawJson.optJSONArray("segments") ?: continue
-                if (segs.length() == 0) continue
+                val vpReady = runCatching { JSONObject(trFile.readText()).optInt("vp_ver", 0) >= SCHEMA_VERSION }.getOrDefault(true)
+                if (vpReady) continue
 
-                val enriched = doEnrich(ctx, opus, rawJson)
-                Transcripts.save(ctx, enriched)
-                changed = true
+                val updated = Transcripts.computeAndCommit(ctx, name) { rawJson ->
+                    if (rawJson.optInt("vp_ver", 0) >= SCHEMA_VERSION) return@computeAndCommit false
+                    doEnrich(ctx, opus, rawJson)
+                    true
+                }
+                if (updated) {
+                    changed = true
+                    batchChanged++
+                    if (batchChanged >= 5) {
+                        batchChanged = 0
+                        AppState.update { it.copy(textVersion = it.textVersion + 1) }
+                    }
+                }
             }
             changed
         }.onFailure { e ->
@@ -461,32 +473,7 @@ internal object Voiceprint {
     }
 
     /**
-     * 为云端同步到达的转写补齐本机原音频的逐句分贝 "db" 与有效发声时长 "act_s"（若远端尚未提供），不改动其已有说话人标签。
-     */
-    fun annotateLoudnessIfMissing(opusFile: File, root: JSONObject): JSONObject = runCatching {
-        val segArr = root.optJSONArray("segments") ?: return root
-        if (segArr.length() == 0) return root
-        val needAny = (0 until segArr.length()).any { i ->
-            val o = segArr.getJSONObject(i)
-            (!o.has("db") || o.isNull("db")) && o.optDouble("end") > o.optDouble("start")
-        }
-        if (!needAny) return root
-        val pcm = Vad.decode16k(opusFile)
-        val energies = computeFrameEnergies16k(pcm)
-        if (energies.isEmpty()) return root
-        for (i in 0 until segArr.length()) {
-            val o = segArr.getJSONObject(i)
-            if (o.has("db") && !o.isNull("db")) continue
-            val stats = computeActiveSpeechStats(energies, 0.02, o.optDouble("start"), o.optDouble("end")) ?: continue
-            o.put("db", stats.first.toDouble())
-            o.put("act_s", stats.second.toDouble())
-        }
-        root
-    }.getOrDefault(root)
-
-    /**
-     * 实时转写路径：仅执行毫秒级 JSON 版本检查（绝不扫描历史音频，绝不长时间占用 uploadLock），
-     * 直接使用已就绪声纹原型完成逐句分贝计算与高精度声纹归属。
+     * 实时转写路径：仅执行毫秒级 JSON 版本检查与声纹/有效分贝计算（环境音与逐句心情放到独立后台队列，绝不阻塞 uploadLock）。
      */
     fun enrichTranscript(ctx: Context, opusFile: File, transcriptJson: JSONObject): JSONObject {
         migrateSchemaFast(ctx)
@@ -497,16 +484,20 @@ internal object Voiceprint {
         }.getOrDefault(transcriptJson)
     }
 
+    private fun finishEnrich(root: JSONObject): JSONObject {
+        root.put("vp_done", true)
+        root.put("vp_ver", SCHEMA_VERSION)
+        return root
+    }
+
     private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject): JSONObject {
+        val t0 = System.currentTimeMillis()
         val segArr = root.optJSONArray("segments")
         if (root.optBoolean("synthetic_segments", false) || segArr == null || segArr.length() == 0) {
-            root.put("vp_done", true)
-            root.put("vp_ver", SCHEMA_VERSION)
-            return root
+            return finishEnrich(root)
         }
+        val pcm = runCatching { Vad.decode16k(opusFile) }.getOrNull() ?: return finishEnrich(root)
 
-        val t0 = System.currentTimeMillis()
-        val pcm = Vad.decode16k(opusFile)
         val energies = computeFrameEnergies16k(pcm)
 
         // 1. 为所有真实分句写入剔除停顿后的有效语音平均分贝 "db" 与有效发声时长 "act_s"
@@ -531,16 +522,12 @@ internal object Voiceprint {
                 segArr.getJSONObject(i).optString("speaker").startsWith("spk_")
             }
             if (hasMacGlobal) {
-                root.put("vp_done", true)
-                root.put("vp_ver", SCHEMA_VERSION)
-                return root
+                return finishEnrich(root)
             }
         }
 
         if (pcm.size < (KaldiFbank.SAMPLE_RATE * MIN_SPEECH_S).toInt()) {
-            root.put("vp_done", true)
-            root.put("vp_ver", SCHEMA_VERSION)
-            return root
+            return finishEnrich(root)
         }
 
         val hasDiarizedLabels = (0 until segArr.length()).any { i ->
@@ -588,9 +575,7 @@ internal object Voiceprint {
                     }
                 }
             }
-            root.put("vp_done", true)
-            root.put("vp_ver", SCHEMA_VERSION)
-            return root
+            return finishEnrich(root)
         }
 
         val clusters = clusterInFile(extractedUtts, IN_FILE_MERGE_SIM)
@@ -649,11 +634,10 @@ internal object Voiceprint {
             }
         }
 
-        root.put("vp_done", true)
-        root.put("vp_ver", SCHEMA_VERSION)
+        finishEnrich(root)
         Log.i(
             TAG,
-            "${opusFile.name}: v$SCHEMA_VERSION 声纹+分贝完成（${clusters.size} 簇 -> ${keyToSpeaker.values.distinct()}），耗时 ${System.currentTimeMillis() - t0}ms",
+            "${opusFile.name}: v$SCHEMA_VERSION 声纹+分贝完成（${clusters.size} 簇 -> ${keyToSpeaker.values.distinct()}），总耗时 ${System.currentTimeMillis() - t0}ms",
         )
         return root
     }

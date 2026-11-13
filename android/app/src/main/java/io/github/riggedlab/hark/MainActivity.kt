@@ -136,6 +136,9 @@ internal data class ParaUi(
     val whoLower: String?,
     val hasAnyAudio: Boolean,
     val avgDb: Float?,
+    val mood: String?,
+    val moodScore: Float?,
+    val vocalTags: List<String>,
 )
 
 @Immutable
@@ -147,6 +150,10 @@ internal data class EventUi(
     val peopleText: String,
     val avgDb: Float?,
     val speakerLevelsSummary: String?,
+    val sceneSummary: String?,
+    val mood: String?,
+    val moodScore: Float?,
+    val vocalTags: List<String>,
     val paras: List<ParaUi>,
     val firstAudioLine: LineUi?,
     val copyText: String,
@@ -177,6 +184,9 @@ internal data class RecordingCardUi(
     val timeRangeLabel: String,
     val durationLabel: String,
     val placeLabel: String?,
+    val sceneSummary: String?,
+    val mood: String?,
+    val moodScore: Float?,
     val transcriptPreview: String?,
     val baseStatus: BaseChunkStatus,
     val searchBlob: String,
@@ -341,7 +351,8 @@ class MainActivity : ComponentActivity() {
         val spkPhoneMod = java.io.File(filesDir, "speakers_phone.json").lastModified()
         val placeMod = java.io.File(filesDir, "places/places.json").lastModified()
         val fixMod = java.io.File(filesDir, "places/fixes.jsonl").lastModified()
-        return "$opusCount:$newestMod:$textCount:${marks.uploaded.size}:${marks.silent.size}:${marks.badAudio}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
+        val sceneSig = SceneAndMood.sceneSignature(this)
+        return "$opusCount:$newestMod:$textCount:$sceneSig:${marks.uploaded.size}:${marks.silent.size}:${marks.badAudio}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
     }
 
     private fun resolveInRoster(id: String?, roster: Map<String, Speaker>): Speaker? {
@@ -407,7 +418,15 @@ class MainActivity : ComponentActivity() {
                 val prevDb = lastLines?.last()?.seg?.db
                 val curDb = l.seg.db
                 val dbConsistent = prevDb == null || curDb == null || abs(prevDb - curDb) < 5.0f
-                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S && dbConsistent) {
+                val prevMood = lastLines?.last()?.seg?.mood
+                val curMood = l.seg.mood
+                val oppositePolarity = (prevMood == "positive" && curMood == "negative") ||
+                    (prevMood == "negative" && curMood == "positive")
+                val moodConsistent = !oppositePolarity && (
+                    prevMood == null || curMood == null || prevMood == curMood ||
+                        abs((lastLines.last().seg.moodScore ?: 0f) - (l.seg.moodScore ?: 0f)) < 0.42f
+                    )
+                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S && dbConsistent && moodConsistent) {
                     lastLines.add(l)
                 } else {
                     paras.add(mutableListOf(l))
@@ -417,6 +436,8 @@ class MainActivity : ComponentActivity() {
             val paraUis = paras.mapIndexed { idx, pLines ->
                 val (who, spkId, _) = paraMeta[idx]
                 val joined = pLines.joinToString("") { it.seg.text.trim() }
+                val moodPair = computeWeightedMood(pLines)
+                val vTags = pLines.mapNotNull { it.seg.vocalTag }.distinct().take(2)
                 ParaUi(
                     lines = pLines,
                     who = who,
@@ -426,6 +447,9 @@ class MainActivity : ComponentActivity() {
                     whoLower = who?.lowercase(),
                     hasAnyAudio = pLines.any { it.rec.hasAudio },
                     avgDb = computeEnergyWeightedDb(pLines),
+                    mood = moodPair?.first,
+                    moodScore = moodPair?.second,
+                    vocalTags = vTags,
                 )
             }
             val start = g.first().at
@@ -435,6 +459,12 @@ class MainActivity : ComponentActivity() {
             val eHm = end.format(HM)
             val timeLabel = if (sHm == eHm) sHm else "$sHm – $eHm"
             val place = Places.at(this, start)
+            val sceneTags = aggregateSceneTags(
+                g.map { it.rec.name }.distinct().map { SceneAndMood.getSceneTags(this, it) }.filter { it.isNotEmpty() },
+            )
+            val sceneSummary = formatSceneTags(sceneTags)
+            val eventMoodPair = computeWeightedMood(g)
+            val eventVocalTags = g.mapNotNull { it.seg.vocalTag }.distinct().take(2)
             val peopleList = paraUis.mapNotNull { it.who }.distinct()
             val peopleWithLevels = run {
                 val byWho = LinkedHashMap<String, MutableList<LineUi>>()
@@ -444,7 +474,9 @@ class MainActivity : ComponentActivity() {
                 }
                 if (byWho.isEmpty()) ""
                 else {
-                    val entries = byWho.map { (w, ls) -> w to computeEnergyWeightedDb(ls) }
+                    val entries = byWho.map { (w, ls) ->
+                        w to computeEnergyWeightedDb(ls)
+                    }
                     val sorted = if (entries.any { it.second != null }) {
                         entries.sortedByDescending { it.second ?: -99f }
                     } else entries
@@ -458,14 +490,22 @@ class MainActivity : ComponentActivity() {
             val copyText = buildString {
                 append("[").append(day.format(MD)).append(" ").append(if (sHm == eHm) sHm else "$sHm–$eHm")
                 place?.let { append(" · ").append(it.label) }
+                sceneSummary?.let { append(" · 环境: ").append(it) }
                 append("]\n")
                 for (p in paraUis) {
+                    val metaParts = buildList {
+                        p.avgDb?.let { add(formatDb(it)) }
+                        if (p.mood != null && p.moodScore != null) {
+                            add("${moodCnLabel(p.mood)} ${formatMoodScore(p.moodScore)}")
+                        }
+                        if (p.vocalTags.isNotEmpty()) add(p.vocalTags.joinToString("/"))
+                    }
                     if (p.who != null) {
                         append(p.who)
-                        p.avgDb?.let { append(" (").append(formatDb(it)).append(")") }
+                        if (metaParts.isNotEmpty()) append(" (").append(metaParts.joinToString(" · ")).append(")")
                         append("：")
-                    } else if (p.avgDb != null) {
-                        append("(").append(formatDb(p.avgDb)).append(") ")
+                    } else if (metaParts.isNotEmpty()) {
+                        append("(").append(metaParts.joinToString(" · ")).append(") ")
                     }
                     if (p.lines.size <= 1) {
                         append(p.text)
@@ -481,6 +521,12 @@ class MainActivity : ComponentActivity() {
             }.trimEnd()
             val searchBlob = buildString {
                 place?.label?.let { append(it.lowercase()).append('\n') }
+                sceneTags.forEach { append(it.label.lowercase()).append('\n') }
+                eventMoodPair?.let { append(moodCnLabel(it.first)).append('\n') }
+                for (p in paraUis) {
+                    p.mood?.let { append(moodCnLabel(it)).append('\n') }
+                    p.vocalTags.forEach { append(it.lowercase()).append('\n') }
+                }
                 if (peopleText.isNotEmpty()) append(peopleText.lowercase()).append('\n')
                 for (p in paraUis) append(p.textLower).append('\n')
             }
@@ -493,6 +539,10 @@ class MainActivity : ComponentActivity() {
                 peopleText = peopleText,
                 avgDb = eventAvgDb,
                 speakerLevelsSummary = peopleWithLevels.ifEmpty { null },
+                sceneSummary = sceneSummary,
+                mood = eventMoodPair?.first,
+                moodScore = eventMoodPair?.second,
+                vocalTags = eventVocalTags,
                 paras = paraUis,
                 firstAudioLine = g.firstOrNull { it.rec.hasAudio },
                 copyText = copyText,
@@ -526,9 +576,16 @@ class MainActivity : ComponentActivity() {
                 else -> BaseChunkStatus.PENDING
             }
             val preview = tr?.text?.takeIf { it.isNotBlank() }
+            val recSceneTags = SceneAndMood.getSceneTags(this, r.name)
+            val recSceneSummary = recSceneTags.takeIf { it.isNotEmpty() }?.let { formatSceneTags(it) }
+            val recMoodPair = tr?.segments?.takeIf { it.isNotEmpty() }?.let { segs ->
+                computeWeightedMoodFromSegments(segs)
+            }
             val searchBlob = buildString {
                 append(r.name.lowercase())
                 place?.label?.let { append('\n').append(it.lowercase()) }
+                recSceneTags.forEach { append('\n').append(it.label.lowercase()) }
+                recMoodPair?.let { append('\n').append(moodCnLabel(it.first)) }
                 preview?.let { append('\n').append(it.lowercase()) }
             }
             RecordingCardUi(
@@ -536,6 +593,9 @@ class MainActivity : ComponentActivity() {
                 timeRangeLabel = "${r.start.format(T)} – ${r.end.format(T)}",
                 durationLabel = fmtDuration(r.durationSec),
                 placeLabel = place?.label,
+                sceneSummary = recSceneSummary,
+                mood = recMoodPair?.first,
+                moodScore = recMoodPair?.second,
                 transcriptPreview = preview,
                 baseStatus = baseStatus,
                 searchBlob = searchBlob,
@@ -1990,6 +2050,9 @@ private fun EventCardView(
     val firstAudio = ev.firstAudioLine
 
     SectionCard {
+        val singleKnownSpeaker = ev.paras.all { it.who != null } && ev.paras.map { it.who }.distinct().size <= 1
+        val showLabels = (ev.peopleText.isNotEmpty() && !singleKnownSpeaker) || ev.paras.size > 1
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
@@ -1997,16 +2060,26 @@ private fun EventCardView(
                     style = MaterialTheme.typography.titleMedium.merge(TabularMono),
                     fontWeight = FontWeight.SemiBold,
                 )
-                if (ev.place != null || ev.speakerLevelsSummary != null || ev.avgDb != null) {
+                val hasTopMeta = ev.place != null || ev.sceneSummary != null || ev.speakerLevelsSummary != null || ev.avgDb != null || (!showLabels && ev.mood != null && ev.moodScore != null)
+                if (hasTopMeta) {
                     Spacer(Modifier.height(4.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         ev.place?.let { p ->
                             MetaTag(Icons.Rounded.Place, p.label, deck.place) { onEditPlace(p) }
+                        }
+                        ev.sceneSummary?.let { scene ->
+                            MetaTag(Icons.Rounded.GraphicEq, scene, colors.secondary)
                         }
                         if (ev.speakerLevelsSummary != null) {
                             MetaTag(Icons.Rounded.Group, ev.speakerLevelsSummary, colors.tertiary)
                         } else if (ev.avgDb != null) {
                             MetaTag(Icons.Rounded.GraphicEq, formatDb(ev.avgDb), colors.onSurfaceVariant)
+                        }
+                        if (!showLabels && ev.mood != null && ev.moodScore != null) {
+                            MoodBadge(ev.mood, ev.moodScore, ev.vocalTags.firstOrNull())
                         }
                     }
                 }
@@ -2033,8 +2106,7 @@ private fun EventCardView(
         Spacer(Modifier.height(8.dp))
         var prevLabel: String? = null
         var prevDb: Float? = null
-        val singleKnownSpeaker = ev.paras.all { it.who != null } && ev.paras.map { it.who }.distinct().size <= 1
-        val showLabels = (ev.peopleText.isNotEmpty() && !singleKnownSpeaker) || ev.paras.size > 1
+        var prevMood: String? = null
 
         val visibleParas = if (highlightQuery.isBlank() || ev.paras.size <= 2) {
             ev.paras
@@ -2050,7 +2122,8 @@ private fun EventCardView(
         visibleParas.forEach { p ->
             val label = p.who ?: "未识别"
             val dbShifted = p.avgDb != null && prevDb != null && abs(p.avgDb - prevDb!!) >= 4.0f
-            if (showLabels && (label != prevLabel || dbShifted)) {
+            val moodShifted = p.mood != null && prevMood != null && p.mood != prevMood
+            if (showLabels && (label != prevLabel || dbShifted || moodShifted)) {
                 Row(
                     modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -2074,10 +2147,14 @@ private fun EventCardView(
                             color = colors.onSurfaceVariant.copy(alpha = 0.85f),
                         )
                     }
+                    if (p.mood != null && p.moodScore != null) {
+                        MoodBadge(p.mood, p.moodScore, p.vocalTags.firstOrNull())
+                    }
                 }
             }
             prevLabel = label
             prevDb = p.avgDb
+            prevMood = p.mood
 
             val cardInvolvesPlaying = playingName != null && p.lines.any { it.rec.name == playingName }
             val paraActive = cardInvolvesPlaying && p.lines.any { l ->
@@ -2357,9 +2434,13 @@ private fun RecordingCardItem(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     StatusPill(statusText)
                     item.placeLabel?.let { MetaTag(Icons.Rounded.Place, it, deck.place) }
+                    item.sceneSummary?.let { MetaTag(Icons.Rounded.GraphicEq, it, colors.secondary) }
+                    if (item.mood != null && item.moodScore != null) {
+                        MoodBadge(item.mood, item.moodScore)
+                    }
                 }
             }
         }
@@ -2842,6 +2923,31 @@ private fun MetaTag(icon: ImageVector, text: String, color: Color, onClick: (() 
 }
 
 @Composable
+private fun MoodBadge(mood: String, score: Float, vocalTag: String? = null) {
+    val deck = DeckTheme.colors
+    val colors = MaterialTheme.colorScheme
+    val (bg, fg) = when (mood) {
+        "positive" -> deck.ledGreen.copy(alpha = 0.14f) to deck.ledGreen
+        "negative" -> deck.ledAmber.copy(alpha = 0.16f) to deck.ledAmber
+        else -> colors.surfaceContainerHigh to colors.onSurfaceVariant
+    }
+    val text = buildString {
+        append(moodCnLabel(mood)).append(' ').append(formatMoodScore(score))
+        if (!vocalTag.isNullOrBlank()) append(" · ").append(vocalTag)
+    }
+    Text(
+        text = text,
+        modifier = Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(bg)
+            .padding(horizontal = 6.dp, vertical = 1.5.dp),
+        style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+        color = fg,
+        maxLines = 1,
+    )
+}
+
+@Composable
 private fun StatusPill(text: String) {
     Text(
         text = text,
@@ -3024,4 +3130,59 @@ private fun computeEnergyWeightedDb(lines: List<LineUi>): Float? {
 }
 
 private fun formatDb(db: Float): String = String.format(Locale.US, "%.1fdB", db)
+
+private fun moodCnLabel(mood: String): String = when (mood) {
+    "positive" -> "积极"
+    "negative" -> "消极"
+    else -> "中性"
+}
+
+private fun formatMoodScore(score: Float): String = String.format(Locale.US, "%+.2f", score)
+
+private fun computeWeightedMoodFromSegments(segs: List<Segment>): Pair<String, Float>? {
+    var weighted = 0.0
+    var totalDur = 0.0
+    for (s in segs) {
+        val sc = s.moodScore ?: continue
+        val dur = (s.activeSec?.toDouble() ?: (s.end - s.start)).coerceIn(0.05, 60.0)
+        weighted += dur * sc.toDouble()
+        totalDur += dur
+    }
+    if (totalDur <= 0.0) return null
+    val avg = ((weighted / totalDur * 100.0).roundToInt() / 100.0).toFloat().coerceIn(-0.99f, 0.99f)
+    val mood = when {
+        avg >= SceneAndMood.NEUTRAL_BAND -> "positive"
+        avg <= -SceneAndMood.NEUTRAL_BAND -> "negative"
+        else -> "neutral"
+    }
+    return mood to avg
+}
+
+private fun computeWeightedMood(lines: List<LineUi>): Pair<String, Float>? =
+    computeWeightedMoodFromSegments(lines.map { it.seg })
+
+private fun aggregateSceneTags(tagLists: List<List<SceneTag>>): List<SceneTag> {
+    if (tagLists.isEmpty()) return emptyList()
+    val merged = LinkedHashMap<String, Float>()
+    for (list in tagLists) {
+        for (t in list) {
+            val prev = merged[t.label]
+            if (prev == null || t.score > prev) merged[t.label] = t.score
+        }
+    }
+    if (merged.isEmpty()) return emptyList()
+    val nonQuiet = merged.filterKeys { it != "室内安静" && it != "安静无声" }
+    val source = if (nonQuiet.isNotEmpty()) nonQuiet else merged
+    return source.entries
+        .sortedByDescending { it.value }
+        .take(3)
+        .map { SceneTag(it.key, it.value) }
+}
+
+private fun formatSceneTags(tags: List<SceneTag>): String? {
+    if (tags.isEmpty()) return null
+    return tags.joinToString(" · ") { t ->
+        String.format(Locale.US, "%s %.2f", t.label, t.score)
+    }
+}
 

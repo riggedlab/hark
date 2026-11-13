@@ -59,17 +59,21 @@ type ResolvedSegment struct {
 	SpeakerLabel string   `json:"speaker_label,omitempty"`
 	DB           *float64 `json:"db,omitempty"`
 	ActiveS      *float64 `json:"act_s,omitempty"`
+	Mood         string   `json:"mood,omitempty"`
+	MoodScore    *float64 `json:"mood_score,omitempty"`
+	VocalTag     string   `json:"vocal_tag,omitempty"`
 }
 
 type TranscriptDetail struct {
-	Name      string            `json:"name"`
-	StartedAt string            `json:"started_at"`
-	DurationS float64           `json:"duration_s"`
-	SpeechS   float64           `json:"speech_s"`
-	Engine    string            `json:"engine"`
-	Model     string            `json:"model"`
-	Text      string            `json:"text"`
-	Segments  []ResolvedSegment `json:"segments"`
+	Name      string              `json:"name"`
+	StartedAt string              `json:"started_at"`
+	DurationS float64             `json:"duration_s"`
+	SpeechS   float64             `json:"speech_s"`
+	Engine    string              `json:"engine"`
+	Model     string              `json:"model"`
+	Text      string              `json:"text"`
+	Segments  []ResolvedSegment   `json:"segments"`
+	SceneTags []protocol.SceneTag `json:"scene_tags,omitempty"`
 }
 
 type ASRMetrics struct {
@@ -146,6 +150,7 @@ func (s *Store) migrate() error {
 			model TEXT,
 			text TEXT,
 			segments TEXT,
+			scene_tags_json TEXT DEFAULT '[]',
 			created_at TEXT DEFAULT (datetime('now','localtime'))
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_transcripts_started ON transcripts(started_at DESC)`,
@@ -206,6 +211,22 @@ func (s *Store) migrate() error {
 			_, _ = s.db.Exec(fmt.Sprintf(`ALTER TABLE speakers ADD COLUMN %s %s`, col[0], col[1]))
 		}
 	}
+
+	trCols := map[string]bool{}
+	if tRows, terr := s.db.Query(`PRAGMA table_info(transcripts)`); terr == nil {
+		for tRows.Next() {
+			var cid, notNull, pk int
+			var name, ctype string
+			var dflt sql.NullString
+			if tRows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk) == nil {
+				trCols[name] = true
+			}
+		}
+		tRows.Close()
+	}
+	if !trCols["scene_tags_json"] {
+		_, _ = s.db.Exec(`ALTER TABLE transcripts ADD COLUMN scene_tags_json TEXT DEFAULT '[]'`)
+	}
 	return nil
 }
 
@@ -217,10 +238,18 @@ func (s *Store) SaveTranscript(p protocol.TranscriptPayload) error {
 	if err != nil {
 		return err
 	}
+	sceneSlice := p.SceneTags
+	if sceneSlice == nil {
+		sceneSlice = []protocol.SceneTag{}
+	}
+	rawScenes, err := json.Marshal(sceneSlice)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.Exec(`
-		INSERT OR REPLACE INTO transcripts(name, started_at, duration_s, speech_s, engine, model, text, segments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.Name, p.StartedAt, p.DurationS, p.SpeechS, p.Engine, p.Model, p.Text, string(rawSegs),
+		INSERT OR REPLACE INTO transcripts(name, started_at, duration_s, speech_s, engine, model, text, segments, scene_tags_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Name, p.StartedAt, p.DurationS, p.SpeechS, p.Engine, p.Model, p.Text, string(rawSegs), string(rawScenes),
 	)
 	return err
 }
@@ -464,7 +493,7 @@ func (s *Store) GetDetail(name string) (TranscriptDetail, error) {
 	if err != nil {
 		return TranscriptDetail{}, err
 	}
-	return scanTranscript(s.db.QueryRow(`SELECT `+transcriptColumns+` FROM transcripts WHERE name = ?`, name),
+	return scanTranscript(s.db.QueryRow(`SELECT `+s.transcriptColumnsLocked()+` FROM transcripts WHERE name = ?`, name),
 		speakerMapFromRecords(records))
 }
 

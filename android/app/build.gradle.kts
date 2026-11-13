@@ -79,9 +79,39 @@ android {
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/probeAssets"))
 }
 
-val speakerModelName = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
-val speakerModelSha256 = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
-val speakerModelUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$speakerModelName"
+data class ModelAssetSpec(
+    val cacheFileName: String,
+    val assetFileName: String,
+    val sha256: String,
+    val url: String,
+)
+
+val bundledModelSpecs = listOf(
+    ModelAssetSpec(
+        cacheFileName = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+        assetFileName = "campplus_zh_16k.onnx",
+        sha256 = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+        url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+    ),
+    ModelAssetSpec(
+        cacheFileName = "ced_tiny_audio_tagging_int8.onnx",
+        assetFileName = "ced_tiny_audio_tagging_int8.onnx",
+        sha256 = "73aa22e783115f6a4ae169b36089907e07d0fd44795595eddea9c1bfc74cc945",
+        url = "https://huggingface.co/k2-fsa/sherpa-onnx-ced-tiny-audio-tagging-2024-04-19/resolve/main/model.int8.onnx",
+    ),
+    ModelAssetSpec(
+        cacheFileName = "bge_small_zh_v15_q8.onnx",
+        assetFileName = "bge_small_zh_v15_q8.onnx",
+        sha256 = "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc",
+        url = "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx",
+    ),
+    ModelAssetSpec(
+        cacheFileName = "bge_small_zh_vocab.txt",
+        assetFileName = "bge_small_zh_vocab.txt",
+        sha256 = "45bbac6b341c319adc98a532532882e91a9cefc0329aa57bac9ae761c27b291c",
+        url = "https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/main/vocab.txt",
+    ),
+)
 
 fun fileSha256(f: File): String {
     val md = MessageDigest.getInstance("SHA-256")
@@ -102,33 +132,39 @@ val syncProbeAsset by tasks.registering {
     val userHome = System.getProperty("user.home")
     val gradleHome = gradle.gradleUserHomeDir
     inputs.file(probeSrc)
-    inputs.property("speakerModelSha256", speakerModelSha256)
+    inputs.property("modelShas", bundledModelSpecs.joinToString(",") { "${it.assetFileName}:${it.sha256}" })
     outputs.dir(outDir)
     doLast {
         val dir = outDir.get().asFile.apply { mkdirs() }
         probeSrc.copyTo(File(dir, "probe.opus"), overwrite = true)
 
-        val localCache = File(userHome, ".cache/hark/models/$speakerModelName")
-        val gradleCache = File(gradleHome, "caches/hark-models/$speakerModelName")
-        val modelFile = when {
-            localCache.exists() && fileSha256(localCache) == speakerModelSha256 -> localCache
-            gradleCache.exists() && fileSha256(gradleCache) == speakerModelSha256 -> gradleCache
-            else -> {
-                gradleCache.parentFile.mkdirs()
-                logger.lifecycle("Downloading 3D-Speaker CAM++ ONNX model ($speakerModelName)...")
-                val tmp = File(gradleCache.parentFile, "$speakerModelName.tmp")
-                URL(speakerModelUrl).openStream().use { ins ->
-                    tmp.outputStream().use { outs -> ins.copyTo(outs) }
+        for (spec in bundledModelSpecs) {
+            val localCache = File(userHome, ".cache/hark/models/${spec.cacheFileName}")
+            val gradleCache = File(gradleHome, "caches/hark-models/${spec.cacheFileName}")
+            val modelFile = when {
+                localCache.exists() && fileSha256(localCache) == spec.sha256 -> localCache
+                gradleCache.exists() && fileSha256(gradleCache) == spec.sha256 -> gradleCache
+                else -> {
+                    gradleCache.parentFile.mkdirs()
+                    logger.lifecycle("Downloading ${spec.assetFileName} (${spec.url})...")
+                    val tmp = File(gradleCache.parentFile, "${spec.cacheFileName}.tmp")
+                    URL(spec.url).openConnection().apply {
+                        setRequestProperty("User-Agent", "Hark-Build/1.0")
+                        connectTimeout = 30_000
+                        readTimeout = 120_000
+                    }.getInputStream().use { ins ->
+                        tmp.outputStream().use { outs -> ins.copyTo(outs) }
+                    }
+                    val gotSha = fileSha256(tmp)
+                    check(gotSha == spec.sha256) {
+                        "Model SHA-256 mismatch for ${spec.assetFileName}: expected ${spec.sha256}, got $gotSha"
+                    }
+                    tmp.renameTo(gradleCache)
+                    gradleCache
                 }
-                val gotSha = fileSha256(tmp)
-                check(gotSha == speakerModelSha256) {
-                    "Speaker model SHA-256 mismatch: expected $speakerModelSha256, got $gotSha"
-                }
-                tmp.renameTo(gradleCache)
-                gradleCache
             }
+            modelFile.copyTo(File(dir, spec.assetFileName), overwrite = true)
         }
-        modelFile.copyTo(File(dir, "campplus_zh_16k.onnx"), overwrite = true)
     }
 }
 
@@ -154,6 +190,7 @@ dependencies {
 dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20231013")
+    testImplementation("com.microsoft.onnxruntime:onnxruntime:1.20.0")
     testImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

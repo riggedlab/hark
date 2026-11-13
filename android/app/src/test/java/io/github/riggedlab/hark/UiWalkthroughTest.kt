@@ -70,10 +70,16 @@ class UiWalkthroughTest {
                 .put("duration_s", 298.0)
                 .put("text", "所以感觉还是要先把插件接口收敛干净。好的没问题，周五下午三点过一遍硬件打样结构。")
                 .put(
+                    "scene_tags",
+                    JSONArray()
+                        .put(JSONObject().put("label", "敲键盘").put("score", 0.82))
+                        .put(JSONObject().put("label", "笑声").put("score", 0.64)),
+                )
+                .put(
                     "segments",
                     JSONArray()
-                        .put(JSONObject().put("start", 1.2).put("end", 9.5).put("text", "所以感觉还是要先把手机直连和云端信箱两条路径做干净，出门在外直接手机出字，回家自动补传归档。").put("speaker", "spk_01").put("db", -19.6))
-                        .put(JSONObject().put("start", 10.4).put("end", 18.2).put("text", "好的没问题，那我们周五下午三点再过一遍超薄磁吸外壳的公差和电池仓倒角。").put("speaker", "spk_02").put("db", -29.8)),
+                        .put(JSONObject().put("start", 1.2).put("end", 9.5).put("text", "所以感觉还是要先把手机直连和云端信箱两条路径做干净，出门在外直接手机出字，回家自动补传归档。").put("speaker", "spk_01").put("db", -19.6).put("mood", "positive").put("mood_score", 0.62).put("vocal_tag", "笑声"))
+                        .put(JSONObject().put("start", 10.4).put("end", 18.2).put("text", "好的没问题，那我们周五下午三点再过一遍超薄磁吸外壳的公差和电池仓倒角。").put("speaker", "spk_02").put("db", -29.8).put("mood", "neutral").put("mood_score", 0.05)),
                 ),
         )
         Transcripts.save(
@@ -83,9 +89,13 @@ class UiWalkthroughTest {
                 .put("duration_s", 185.0)
                 .put("text", "备忘一下今晚跑通本地 hark timeline 查询。")
                 .put(
+                    "scene_tags",
+                    JSONArray().put(JSONObject().put("label", "室内安静").put("score", 0.91)),
+                )
+                .put(
                     "segments",
                     JSONArray()
-                        .put(JSONObject().put("start", 0.5).put("end", 6.8).put("text", "备忘一下今晚把本地 hark timeline 查询和手机端磁带走带界面一起验收。").put("speaker", "other_1").put("db", -20.4)),
+                        .put(JSONObject().put("start", 0.5).put("end", 6.8).put("text", "备忘一下今晚把本地 hark timeline 查询和手机端磁带走带界面一起验收。").put("speaker", "other_1").put("db", -20.4).put("mood", "neutral").put("mood_score", 0.04)),
                 ),
         )
 
