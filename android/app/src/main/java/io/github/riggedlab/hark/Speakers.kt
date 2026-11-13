@@ -97,12 +97,14 @@ object Speakers {
     @Synchronized
     fun all(ctx: Context): Map<String, Speaker> {
         migrateLegacy(ctx)
+        Voiceprint.migrateSchemaFast(ctx)
         val mac = read(ctx, "speakers_mac").getJSONObject("items")
-        val local = read(ctx, "speakers_local").getJSONObject("items")
+        val local = read(ctx, "speakers_local").optJSONObject("items") ?: JSONObject()
         val phone = read(ctx, "speakers_phone").getJSONObject("items")
         val ids = LinkedHashSet<String>().apply {
             mac.keys().forEach { add(it) }
             local.keys().forEach { if (it.startsWith("pspk_") || !mac.has(it)) add(it) }
+            phone.keys().forEach { add(it) }
         }
         return ids.associateWith { id ->
             val meta = mac.optJSONObject(id) ?: local.optJSONObject(id) ?: JSONObject()

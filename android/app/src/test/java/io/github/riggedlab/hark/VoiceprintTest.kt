@@ -71,18 +71,20 @@ class VoiceprintTest {
         )
         Speakers.edit(ctx, "spk_001", name = "我")
 
-        val localJson = JSONObject().put(
-            "items",
-            JSONObject().put(
-                "pspk_001",
-                JSONObject()
-                    .put("centroid", JSONArray(FloatArray(192) { 0.05f }.map { it.toDouble() }))
-                    .put("weight", 5.0)
-                    .put("model", Voiceprint.MODEL_ID)
-                    .put("first_seen", "2026-11-13 10:00")
-                    .put("sample", "手机端新识出的人"),
-            ),
-        )
+        val localJson = JSONObject()
+            .put("version", Voiceprint.SCHEMA_VERSION)
+            .put(
+                "items",
+                JSONObject().put(
+                    "pspk_001",
+                    JSONObject()
+                        .put("centroid", JSONArray(FloatArray(192) { 0.05f }.map { it.toDouble() }))
+                        .put("weight", 12.0)
+                        .put("model", Voiceprint.MODEL_ID)
+                        .put("first_seen", "2026-11-13 10:00")
+                        .put("sample", "手机端新识出的人"),
+                ),
+            )
         Sync.writeFile(File(ctx.filesDir, "speakers_local.json"), localJson.toString())
 
         val all = Speakers.all(ctx)
@@ -105,16 +107,28 @@ class VoiceprintTest {
         File(ctx.filesDir, "speakers_phone.json").delete()
         File(ctx.filesDir, "speakers_mac.json").delete()
 
-        // 1. 两个在文件内未被合并的独立簇（余弦 0.60 < 0.62），绝不能在同轮新建原型时串成同一个 pspk_001
+        // 1. 两个在文件内未被合并的独立簇（均 >= 10s 建档门槛），绝不能在同轮新建原型时串成同一个 pspk_001
         val v1 = Voiceprint.l2Normalize(FloatArray(192) { if (it == 0) 1f else 0f })
         val v2 = Voiceprint.l2Normalize(FloatArray(192) { if (it == 0) 0.60f else if (it == 1) 0.80f else 0f })
         val clusters = listOf(
-            listOf("s1") to Voiceprint.LocalTurnGroup("s1", 6.0, v1, "说话人一"),
-            listOf("s2") to Voiceprint.LocalTurnGroup("s2", 5.0, v2, "说话人二"),
+            listOf("s1") to Voiceprint.LocalTurnGroup("s1", 12.5, v1, "说话人一"),
+            listOf("s2") to Voiceprint.LocalTurnGroup("s2", 11.0, v2, "说话人二"),
         )
         val firstAssign = Voiceprint.matchAndPersistClusters(ctx, clusters, "2026-11-13 10:00", allowPersistPrototypes = true)
         assertEquals("pspk_001", firstAssign["s1"])
         assertEquals("pspk_002", firstAssign["s2"])
+
+        // 1b. 同性别陌生人（余弦 0.61 < 0.68 精确门槛，且不足 10s 建档门槛）绝不能误匹配成「我」(pspk_001)
+        val vBorderlineStranger = Voiceprint.l2Normalize(
+            FloatArray(192) { if (it == 0) 0.61f else if (it == 2) 0.7924f else 0f },
+        )
+        val strangerAssign = Voiceprint.matchAndPersistClusters(
+            ctx,
+            listOf(listOf("stranger") to Voiceprint.LocalTurnGroup("stranger", 5.0, vBorderlineStranger, "旁边路人说话")),
+            "2026-11-13 10:02",
+            allowPersistPrototypes = true,
+        )
+        assertEquals("other_1", strangerAssign["stranger"])
 
         // 2. 将 pspk_002 合并入 pspk_001 后，新录音匹配到 pspk_002 原型时仍记录原始 pspk_002，拆开后可无损恢复
         assertTrue(Speakers.edit(ctx, "pspk_001", name = "我"))
@@ -165,5 +179,77 @@ class VoiceprintTest {
         assertTrue(enriched.optBoolean("vp_done", false))
         val seg0 = enriched.getJSONArray("segments").getJSONObject(0)
         assertFalse("无分句纯文本不应被强行赋予说话人标签", seg0.has("speaker"))
+    }
+
+    @Test
+    fun activeSpeechDbIgnoresInternalPausesAndRoundTripsInTranscripts() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        // 1.0 秒 -20 dBFS 人声 + 2.0 秒 -70 dBFS 停顿静音 -> 有效发声响度仍保持 -20.0 dB
+        val energies = DoubleArray(150) { idx -> if (idx < 50) 0.01 else 1e-7 }
+        val db = Voiceprint.computeActiveSpeechDb(energies, 0.02, 0.0, 3.0)
+        assertNotNull(db)
+        assertEquals(-20.0f, db!!, 0.3f)
+
+        val name = "20261113-120000.opus"
+        Transcripts.save(
+            ctx,
+            JSONObject()
+                .put("name", name)
+                .put("duration_s", 12.0)
+                .put("text", "近处说话。远处回应。")
+                .put(
+                    "segments",
+                    JSONArray()
+                        .put(JSONObject().put("start", 0.0).put("end", 4.0).put("text", "近处说话。").put("speaker", "spk_001").put("db", -19.4))
+                        .put(JSONObject().put("start", 5.0).put("end", 9.0).put("text", "远处回应。").put("speaker", "other_1").put("db", -32.6)),
+                ),
+        )
+        val tr = Transcripts.get(ctx, name)
+        assertNotNull(tr)
+        assertEquals(-19.4f, tr!!.segments[0].db!!, 0.05f)
+        assertEquals(-32.6f, tr.segments[1].db!!, 0.05f)
+    }
+
+    @Test
+    fun schemaV1MigrationNeverReusesOldPhoneSpeakerIdsAndPreservesNamedMetadata() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        File(ctx.filesDir, "speakers_local.json").delete()
+        File(ctx.filesDir, "speakers_phone.json").delete()
+        File(ctx.filesDir, "speakers_mac.json").delete()
+
+        // 模拟旧版 v1 曾创建 pspk_001..pspk_005，且用户在 v1 期间曾把 pspk_002 改名为「李总」存入 speakers_phone.json
+        val v1Local = JSONObject().put(
+            "items",
+            JSONObject()
+                .put("pspk_001", JSONObject().put("centroid", JSONArray(List(192) { 0.3 })).put("first_seen", "2026-11-12 08:30").put("sample", "未改名合并目标样本"))
+                .put("pspk_002", JSONObject().put("centroid", JSONArray(List(192) { 0.1 })).put("first_seen", "2026-11-12 09:00").put("sample", "旧样本句"))
+                .put("pspk_004", JSONObject().put("centroid", JSONArray(List(192) { 0.4 })))
+                .put("pspk_005", JSONObject().put("centroid", JSONArray(List(192) { 0.2 }))),
+        )
+        val v1Phone = JSONObject().put(
+            "items",
+            JSONObject()
+                .put("pspk_002", JSONObject().put("name", "李总"))
+                .put("pspk_004", JSONObject().put("merged_into", "pspk_001")),
+        )
+        Sync.writeFile(File(ctx.filesDir, "speakers_local.json"), v1Local.toString())
+        Sync.writeFile(File(ctx.filesDir, "speakers_phone.json"), v1Phone.toString())
+
+        // 首次调用 Speakers.all 即自动完成 v1 -> v2 平滑迁移，且未改名的合并目标 pspk_001 也被完整保留
+        val roster = Speakers.all(ctx)
+        assertEquals("李总", roster["pspk_002"]?.name)
+        assertEquals("旧样本句", roster["pspk_002"]?.sample)
+        assertEquals("pspk_001", Speakers.resolve(ctx, "pspk_004")?.id)
+        assertEquals("未改名合并目标样本", roster["pspk_001"]?.sample)
+
+        // 2. 新建说话人必须从 pspk_006 起分配，绝不复用历史 pspk_001..pspk_005 造成串人
+        val vNew = Voiceprint.l2Normalize(FloatArray(192) { if (it == 7) 1f else 0f })
+        val assigned = Voiceprint.matchAndPersistClusters(
+            ctx,
+            listOf(listOf("u_0") to Voiceprint.LocalTurnGroup("u_0", 12.0, vNew, "全新说话人满十秒")),
+            "2026-11-13 12:00",
+            allowPersistPrototypes = true,
+        )
+        assertEquals("pspk_006", assigned["u_0"])
     }
 }

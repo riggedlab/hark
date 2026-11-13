@@ -52,11 +52,13 @@ type ArchivePage struct {
 }
 
 type ResolvedSegment struct {
-	Start        float64 `json:"start"`
-	End          float64 `json:"end"`
-	Text         string  `json:"text"`
-	SpeakerID    string  `json:"speaker_id,omitempty"`
-	SpeakerLabel string  `json:"speaker_label,omitempty"`
+	Start        float64  `json:"start"`
+	End          float64  `json:"end"`
+	Text         string   `json:"text"`
+	SpeakerID    string   `json:"speaker_id,omitempty"`
+	SpeakerLabel string   `json:"speaker_label,omitempty"`
+	DB           *float64 `json:"db,omitempty"`
+	ActiveS      *float64 `json:"act_s,omitempty"`
 }
 
 type TranscriptDetail struct {

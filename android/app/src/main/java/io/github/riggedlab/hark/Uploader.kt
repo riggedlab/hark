@@ -76,28 +76,29 @@ class Uploader(private val ctx: Context) {
     }
 
     /** 手机本机直调三方 ASR 转写尚未出字的录音，返回 (成功数, 剩余数) */
-    fun transcribePendingLocally(): Pair<Int, Int> = synchronized(uploadLock) {
-        if (Config.mode(ctx) != WorkMode.DIRECT_ASR) return 0 to pendingCloud().size
-        if (Voiceprint.bootstrapIfNeeded(ctx)) {
-            AppState.update { it.copy(textVersion = it.textVersion + 1) }
+    fun transcribePendingLocally(): Pair<Int, Int> {
+        if (Config.mode(ctx) == WorkMode.DIRECT_ASR) {
+            Voiceprint.triggerBackgroundBootstrap(ctx)
         }
-        val cfg = AsrConfig.load(ctx) ?: return 0 to pendingLocalAsr().size
-        var ok = 0
-        for (f in pendingLocalAsr()) {
-            if (Config.mode(ctx) != WorkMode.DIRECT_ASR) break
-            val speech = Vad.speechSeconds(ctx, f)
-            if (speech != null && speech < Vad.MIN_SPEECH_S) {
-                File(silentDir, f.name).createNewFile()
-                Log.i(TAG, "${f.name} 没有人声，跳过手机转写")
-                continue
-            }
-            AppState.update { it.copy(localAsrRunning = f.name) }
-            var abortBatch = false
-            runCatching {
-                val rawJson = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
-                val enriched = Voiceprint.enrichTranscript(ctx, f, rawJson)
-                Transcripts.save(ctx, enriched)
-            }.onSuccess {
+        return synchronized(uploadLock) {
+            if (Config.mode(ctx) != WorkMode.DIRECT_ASR) return@synchronized 0 to pendingCloud().size
+            val cfg = AsrConfig.load(ctx) ?: return@synchronized 0 to pendingLocalAsr().size
+            var ok = 0
+            for (f in pendingLocalAsr()) {
+                if (Config.mode(ctx) != WorkMode.DIRECT_ASR) break
+                val speech = Vad.speechSeconds(ctx, f)
+                if (speech != null && speech < Vad.MIN_SPEECH_S) {
+                    File(silentDir, f.name).createNewFile()
+                    Log.i(TAG, "${f.name} 没有人声，跳过手机转写")
+                    continue
+                }
+                AppState.update { it.copy(localAsrRunning = f.name) }
+                var abortBatch = false
+                runCatching {
+                    val rawJson = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
+                    val enriched = Voiceprint.enrichTranscript(ctx, f, rawJson)
+                    Transcripts.save(ctx, enriched)
+                }.onSuccess {
                 ok++
                 badFileFailures.remove(f.name)
                 AppState.update {
@@ -126,7 +127,8 @@ class Uploader(private val ctx: Context) {
             if (abortBatch) break
         }
         cleanupMarkers()
-        return ok to pendingLocalAsr().size
+        ok to pendingLocalAsr().size
+        }
     }
 
     private fun cleanupMarkers() {

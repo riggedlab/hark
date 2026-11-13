@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/egoist/mygo v0.9.0
+	github.com/pion/opus v0.1.0
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.62.0
 )

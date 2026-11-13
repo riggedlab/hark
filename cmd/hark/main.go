@@ -534,7 +534,11 @@ func writeTranscript(w io.Writer, d worker.TranscriptDetail, segments []worker.R
 	}
 	fmt.Fprintf(w, " | %.1fs（语音 %.1fs）\n", d.DurationS, d.SpeechS)
 	for _, seg := range segments {
-		fmt.Fprintf(w, "- [%s–%s] ", segmentTime(seg.Start), segmentTime(seg.End))
+		if seg.DB != nil {
+			fmt.Fprintf(w, "- [%s–%s | %.1fdB] ", segmentTime(seg.Start), segmentTime(seg.End), *seg.DB)
+		} else {
+			fmt.Fprintf(w, "- [%s–%s] ", segmentTime(seg.Start), segmentTime(seg.End))
+		}
 		if seg.SpeakerLabel != "" {
 			fmt.Fprintf(w, "%s (%s): ", seg.SpeakerLabel, seg.SpeakerID)
 		}

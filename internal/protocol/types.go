@@ -73,10 +73,12 @@ type WorkerStatus struct {
 
 // Segment 转写文本单段结构（与 Android Transcripts.kt 保持一致）。
 type Segment struct {
-	Start   float64 `json:"start"`
-	End     float64 `json:"end"`
-	Text    string  `json:"text"`
-	Speaker *string `json:"speaker"`
+	Start   float64  `json:"start"`
+	End     float64  `json:"end"`
+	Text    string   `json:"text"`
+	Speaker *string  `json:"speaker"`
+	DB      *float64 `json:"db,omitempty"`
+	ActiveS *float64 `json:"act_s,omitempty"`
 }
 
 // TranscriptPayload 加密写入 /v2/outbox/{item_id} 的转写结果。

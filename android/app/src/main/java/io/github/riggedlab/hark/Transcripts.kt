@@ -7,7 +7,14 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 @Immutable
-data class Segment(val start: Double, val end: Double, val text: String, val speaker: String? = null)
+data class Segment(
+    val start: Double,
+    val end: Double,
+    val text: String,
+    val speaker: String? = null,
+    val db: Float? = null,
+    val activeSec: Float? = null,
+)
 
 @Immutable
 data class Transcript(val name: String, val durationSec: Double, val text: String, val segments: List<Segment>)
@@ -54,8 +61,20 @@ object Transcripts {
         val segs = o.optJSONArray("segments")
         val list = (0 until (segs?.length() ?: 0)).map {
             val s = segs!!.getJSONObject(it)
-            Segment(s.optDouble("start"), s.optDouble("end"), s.optString("text"),
-                s.optString("speaker").takeIf { it.isNotBlank() })
+            val dbVal = if (s.has("db") && !s.isNull("db")) {
+                s.optDouble("db", Double.NaN).takeIf { !it.isNaN() }?.toFloat()
+            } else null
+            val actVal = if (s.has("act_s") && !s.isNull("act_s")) {
+                s.optDouble("act_s", Double.NaN).takeIf { !it.isNaN() && it > 0.0 }?.toFloat()
+            } else null
+            Segment(
+                start = s.optDouble("start"),
+                end = s.optDouble("end"),
+                text = s.optString("text"),
+                speaker = s.optString("speaker").takeIf { it.isNotBlank() },
+                db = dbVal,
+                activeSec = actVal,
+            )
         }
         return Transcript(o.getString("name"), o.optDouble("duration_s", 0.0), o.optString("text"), list)
     }

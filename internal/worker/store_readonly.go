@@ -266,7 +266,7 @@ func scanTranscript(row interface{ Scan(...any) error }, spkMap map[string]Speak
 	}
 	d.Segments = make([]ResolvedSegment, 0, len(segs))
 	for _, seg := range segs {
-		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text}
+		rs := ResolvedSegment{Start: seg.Start, End: seg.End, Text: seg.Text, DB: seg.DB, ActiveS: seg.ActiveS}
 		if seg.Speaker != nil && *seg.Speaker != "" {
 			badge, ok := spkMap[*seg.Speaker]
 			if !ok {

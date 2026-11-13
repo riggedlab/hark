@@ -81,6 +81,8 @@ type Segment struct {
 	End     float64     `json:"end"`
 	Text    string      `json:"text"`
 	Speaker FlexSpeaker `json:"speaker,omitempty"`
+	DB      *float64    `json:"db,omitempty"`
+	ActiveS *float64    `json:"act_s,omitempty"`
 }
 
 type SpeakerEmbedding struct {
@@ -235,27 +237,34 @@ func Transcribe(ctx context.Context, cfg Config, opus []byte, name string) (Resu
 	if err := ValidateConfig(cfg); err != nil {
 		return Result{}, err
 	}
+	var res Result
+	var err error
 	switch cfg.Provider {
 	case ProviderMock:
 		dur := math.Round(max(1.0, OggOpusDuration(opus))*100) / 100
 		txt := fmt.Sprintf("测试转写：%s", name)
-		return Result{
+		res = Result{
 			Text:      txt,
 			DurationS: dur,
 			SpeechS:   dur,
 			Engine:    "mock",
 			Model:     "mock-v1",
 			Segments:  []Segment{{Start: 0, End: dur, Text: txt}},
-		}, nil
+		}
 	case ProviderVolcengine:
-		return transcribeVolcengine(ctx, cfg, opus)
+		res, err = transcribeVolcengine(ctx, cfg, opus)
 	case ProviderOpenAI:
-		return transcribeOpenAI(ctx, cfg, opus, name)
+		res, err = transcribeOpenAI(ctx, cfg, opus, name)
 	case ProviderHarkHTTP:
-		return transcribeHarkHTTP(ctx, cfg, opus, name)
+		res, err = transcribeHarkHTTP(ctx, cfg, opus, name)
 	default:
 		return Result{}, fmt.Errorf("不支持的 ASR 接入类型: %s", cfg.Provider)
 	}
+	if err != nil {
+		return Result{}, err
+	}
+	AnnotateSegmentLoudness(opus, res.Segments)
+	return res, nil
 }
 
 // Probe 发送内置双人中文 Ogg Opus 测试语音，实测连通性、耗时、分段时间戳与声纹能力。

@@ -631,6 +631,8 @@ func (e *Engine) processOne(ctx context.Context, cfg Config, key []byte, client 
 			End:     seg.End,
 			Text:    seg.Text,
 			Speaker: spkPtr,
+			DB:      seg.DB,
+			ActiveS: seg.ActiveS,
 		})
 	}
 

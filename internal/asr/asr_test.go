@@ -159,3 +159,33 @@ func TestVolcengineFlashAdapterDiarizationFallbackAndSilence(t *testing.T) {
 		t.Fatalf("expected silent 20000003 to return empty result without error, got %+v err=%v", silentRes, err)
 	}
 }
+
+func TestAnnotateSegmentLoudness(t *testing.T) {
+	segs := []Segment{
+		{Start: 0.0, End: 1.7, Text: "前半句"},
+		{Start: 1.7, End: 3.4, Text: "后半句"},
+	}
+	AnnotateSegmentLoudness(probeAudio, segs)
+	for i, s := range segs {
+		if s.DB == nil {
+			t.Fatalf("segment %d missing DB loudness", i)
+		}
+		if *s.DB < -35.0 || *s.DB > -8.0 {
+			t.Fatalf("segment %d DB out of expected range: %.1f", i, *s.DB)
+		}
+	}
+
+	// 验证停顿门限：1 秒发声 (-20 dBFS) + 2 秒静音 (-65 dBFS) 不应被静音拉低超过 1 dB
+	energies := make([]float64, 150) // 3.0s @ 20ms
+	for i := 0; i < 50; i++ {
+		energies[i] = 0.01 // 10*log10(0.01) = -20.0 dBFS
+	}
+	for i := 50; i < 150; i++ {
+		energies[i] = 1e-7 // -70 dBFS 静音停顿
+	}
+	db, ok := computeActiveSpeechDB(energies, 0.02, 0.0, 3.0)
+	if !ok || db < -20.5 || db > -19.5 {
+		t.Fatalf("expected speech-gated DB ~ -20.0, got %.1f (ok=%v)", db, ok)
+	}
+}
+

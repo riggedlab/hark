@@ -88,6 +88,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -108,6 +109,9 @@ import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 private enum class RootDestination { MAIN, SETTINGS }
@@ -131,6 +135,7 @@ internal data class ParaUi(
     val textLower: String,
     val whoLower: String?,
     val hasAnyAudio: Boolean,
+    val avgDb: Float?,
 )
 
 @Immutable
@@ -140,6 +145,8 @@ internal data class EventUi(
     val timeLabel: String,
     val place: Place?,
     val peopleText: String,
+    val avgDb: Float?,
+    val speakerLevelsSummary: String?,
     val paras: List<ParaUi>,
     val firstAudioLine: LineUi?,
     val copyText: String,
@@ -396,7 +403,10 @@ class MainActivity : ComponentActivity() {
                 val lastLines = paras.lastOrNull()
                 val lastMeta = paraMeta.lastOrNull()
                 val gap = lastLines?.let { Duration.between(it.last().endAt, l.at).toMillis() / 1000.0 }
-                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S) {
+                val prevDb = lastLines?.last()?.seg?.db
+                val curDb = l.seg.db
+                val dbConsistent = prevDb == null || curDb == null || abs(prevDb - curDb) < 5.0f
+                if (lastLines != null && lastMeta != null && lastMeta.third == meta.third && gap != null && gap < PARA_GAP_S && dbConsistent) {
                     lastLines.add(l)
                 } else {
                     paras.add(mutableListOf(l))
@@ -414,6 +424,7 @@ class MainActivity : ComponentActivity() {
                     textLower = joined.lowercase(),
                     whoLower = who?.lowercase(),
                     hasAnyAudio = pLines.any { it.rec.hasAudio },
+                    avgDb = computeEnergyWeightedDb(pLines),
                 )
             }
             val start = g.first().at
@@ -424,14 +435,47 @@ class MainActivity : ComponentActivity() {
             val timeLabel = if (sHm == eHm) sHm else "$sHm – $eHm"
             val place = Places.at(this, start)
             val peopleList = paraUis.mapNotNull { it.who }.distinct()
+            val peopleWithLevels = run {
+                val byWho = LinkedHashMap<String, MutableList<LineUi>>()
+                for (p in paraUis) {
+                    val w = p.who ?: continue
+                    byWho.getOrPut(w) { ArrayList() }.addAll(p.lines)
+                }
+                if (byWho.isEmpty()) ""
+                else {
+                    val entries = byWho.map { (w, ls) -> w to computeEnergyWeightedDb(ls) }
+                    val sorted = if (entries.any { it.second != null }) {
+                        entries.sortedByDescending { it.second ?: -99f }
+                    } else entries
+                    sorted.joinToString(" · ") { (w, db) ->
+                        if (db != null) "$w ${formatDb(db)}" else w
+                    }
+                }
+            }
             val peopleText = peopleList.joinToString("、")
+            val eventAvgDb = computeEnergyWeightedDb(g)
             val copyText = buildString {
                 append("[").append(day.format(MD)).append(" ").append(if (sHm == eHm) sHm else "$sHm–$eHm")
                 place?.let { append(" · ").append(it.label) }
                 append("]\n")
                 for (p in paraUis) {
-                    if (p.who != null) append(p.who).append("：")
-                    append(p.text).append("\n")
+                    if (p.who != null) {
+                        append(p.who)
+                        p.avgDb?.let { append(" (").append(formatDb(it)).append(")") }
+                        append("：")
+                    } else if (p.avgDb != null) {
+                        append("(").append(formatDb(p.avgDb)).append(") ")
+                    }
+                    if (p.lines.size <= 1) {
+                        append(p.text)
+                    } else {
+                        p.lines.forEachIndexed { i, l ->
+                            if (i > 0) append(' ')
+                            append(l.seg.text.trim())
+                            l.seg.db?.let { append(" [").append(formatDb(it)).append("]") }
+                        }
+                    }
+                    append("\n")
                 }
             }.trimEnd()
             val searchBlob = buildString {
@@ -446,6 +490,8 @@ class MainActivity : ComponentActivity() {
                 timeLabel = timeLabel,
                 place = place,
                 peopleText = peopleText,
+                avgDb = eventAvgDb,
+                speakerLevelsSummary = peopleWithLevels.ifEmpty { null },
                 paras = paraUis,
                 firstAudioLine = g.firstOrNull { it.rec.hasAudio },
                 copyText = copyText,
@@ -1950,14 +1996,16 @@ private fun EventCardView(
                     style = MaterialTheme.typography.titleMedium.merge(TabularMono),
                     fontWeight = FontWeight.SemiBold,
                 )
-                if (ev.place != null || ev.peopleText.isNotEmpty()) {
+                if (ev.place != null || ev.speakerLevelsSummary != null || ev.avgDb != null) {
                     Spacer(Modifier.height(4.dp))
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         ev.place?.let { p ->
                             MetaTag(Icons.Rounded.Place, p.label, deck.place) { onEditPlace(p) }
                         }
-                        if (ev.peopleText.isNotEmpty()) {
-                            MetaTag(Icons.Rounded.Group, ev.peopleText, colors.tertiary)
+                        if (ev.speakerLevelsSummary != null) {
+                            MetaTag(Icons.Rounded.Group, ev.speakerLevelsSummary, colors.tertiary)
+                        } else if (ev.avgDb != null) {
+                            MetaTag(Icons.Rounded.GraphicEq, formatDb(ev.avgDb), colors.onSurfaceVariant)
                         }
                     }
                 }
@@ -1983,8 +2031,9 @@ private fun EventCardView(
 
         Spacer(Modifier.height(8.dp))
         var prevLabel: String? = null
+        var prevDb: Float? = null
         val singleKnownSpeaker = ev.paras.all { it.who != null } && ev.paras.map { it.who }.distinct().size <= 1
-        val showLabels = ev.peopleText.isNotEmpty() && !singleKnownSpeaker
+        val showLabels = (ev.peopleText.isNotEmpty() && !singleKnownSpeaker) || ev.paras.size > 1
 
         val visibleParas = if (highlightQuery.isBlank() || ev.paras.size <= 2) {
             ev.paras
@@ -1999,21 +2048,35 @@ private fun EventCardView(
 
         visibleParas.forEach { p ->
             val label = p.who ?: "未识别"
-            if (showLabels && label != prevLabel) {
-                val labelMod = Modifier
-                    .padding(top = 6.dp, bottom = 2.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .let { m ->
-                        if (p.speakerId != null) m.clickable { onEditSpeaker(p.speakerId) } else m
+            val dbShifted = p.avgDb != null && prevDb != null && abs(p.avgDb - prevDb!!) >= 4.0f
+            if (showLabels && (label != prevLabel || dbShifted)) {
+                Row(
+                    modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val labelMod = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .let { m ->
+                            if (p.speakerId != null) m.clickable { onEditSpeaker(p.speakerId) } else m
+                        }
+                    Text(
+                        text = highlightMatches(label, highlightQuery),
+                        modifier = labelMod,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = if (p.speakerId != null) colors.tertiary else colors.onSurfaceVariant,
+                    )
+                    p.avgDb?.let { db ->
+                        Text(
+                            text = formatDb(db),
+                            style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                            color = colors.onSurfaceVariant.copy(alpha = 0.85f),
+                        )
                     }
-                Text(
-                    text = highlightMatches(label, highlightQuery),
-                    modifier = labelMod,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (p.speakerId != null) colors.tertiary else colors.onSurfaceVariant,
-                )
+                }
             }
             prevLabel = label
+            prevDb = p.avgDb
 
             val cardInvolvesPlaying = playingName != null && p.lines.any { it.rec.name == playingName }
             val paraActive = cardInvolvesPlaying && p.lines.any { l ->
@@ -2022,7 +2085,9 @@ private fun EventCardView(
 
             // 非播放卡片对富文本做 remember 缓存，彻底免除滚动期间重复构建 AnnotatedString
             val activeBucket = if (paraActive) (playPosSec * 4).toInt() else -1
-            val annotatedPara = remember(p, highlightQuery, activeBucket, deck.signalRed, deck.signalRedContainer) {
+            val showInlineSentenceDb = p.lines.size > 1
+            val inlineDbColor = colors.outline
+            val annotatedPara = remember(p, highlightQuery, activeBucket, deck.signalRed, deck.signalRedContainer, inlineDbColor) {
                 buildAnnotatedString {
                     p.lines.forEachIndexed { lineIdx, l ->
                         val sentence = l.seg.text.trim()
@@ -2039,6 +2104,17 @@ private fun EventCardView(
                             )
                         }
                         append(buildHighlightedText(sentence, highlightQuery, deck.signalRedContainer, deck.onSignalRedContainer))
+                        if (showInlineSentenceDb && l.seg.db != null) {
+                            withStyle(
+                                SpanStyle(
+                                    fontSize = 11.sp,
+                                    fontFeatureSettings = "tnum",
+                                    color = if (lineActive) deck.signalRed else inlineDbColor,
+                                ),
+                            ) {
+                                append(" ${l.seg.db.roundToInt()}dB ")
+                            }
+                        }
                         if (lineActive) pop()
                         pop()
                     }
@@ -2337,7 +2413,7 @@ private fun PeoplePageView(
                 EmptyStateCard(
                     icon = Icons.Rounded.Group,
                     title = "尚无声纹人物档案",
-                    body = "录音中单人说话满 3 秒后，本机内置声纹模型会自动建档（豆包与 OpenAI 直连同样支持），可试听、起名或合并。",
+                    body = "录音中单人说话满 10 秒后，本机内置声纹模型会自动建档（豆包直连同样支持），可试听、起名或合并。",
                 )
             }
         } else if (unnamedCount >= 2) {
@@ -2931,3 +3007,20 @@ private fun fmtAge(seconds: Double): String = when {
     seconds < 86400 -> "${(seconds / 3600).toInt()}h"
     else -> "${(seconds / 86400).toInt()}d"
 }
+
+private fun computeEnergyWeightedDb(lines: List<LineUi>): Float? {
+    var weightedPower = 0.0
+    var totalDur = 0.0
+    for (l in lines) {
+        val db = l.seg.db ?: continue
+        val dur = (l.seg.activeSec?.toDouble() ?: (l.seg.end - l.seg.start)).coerceIn(0.05, 60.0)
+        weightedPower += dur * 10.0.pow(db.toDouble() / 10.0)
+        totalDur += dur
+    }
+    if (totalDur <= 0.0 || weightedPower <= 0.0) return null
+    val raw = 10.0 * log10(weightedPower / totalDur)
+    return ((raw * 10.0).roundToInt() / 10.0).toFloat()
+}
+
+private fun formatDb(db: Float): String = String.format(Locale.US, "%.1fdB", db)
+
