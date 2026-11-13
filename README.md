@@ -18,7 +18,7 @@ Hark DT-1 佩戴端 ──BLE 加密/Opus──▶ 手机端 (Android / iOS 待�
 ```text
 hark/
 ├── firmware/            # 随身设备固件 (C / Zephyr，蓝牙广播名 Hark DT-1)
-├── enclosure/           # 3D 打印外壳模型（开发板验证版 STL）
+├── enclosure/           # 3D 打印外壳（DT-1 简易款 / 谛听款 STL 与切片工程）
 ├── android/             # 安卓原生 App (Kotlin / Compose，包名 io.github.riggedlab.hark)
 ├── ios/                 # (待开发) iOS 原生 App，后续补入
 ├── server/              # 云端盲信箱 (纯 Go 标准库，零外部依赖，<15MB 镜像)
@@ -33,6 +33,7 @@ hark/
 │   └── worker/          # 拉信箱 → 内存解密 → 调 ASR → 声纹认人 → 本地 SQLite 存档与导出
 ├── docs/
 │   ├── asr-guides/      # ASR 接入契约、常见服务商预设与 Mac Apple Silicon 本地 MLX + 声纹实战经验
+│   ├── hardware.md      # DT-1 硬件方案：物料、接线图、外壳与装配
 │   └── hardware-pcb-notes.md
 └── go.mod
 ```
@@ -176,6 +177,12 @@ git tag v0.1.0
 git push origin main v0.1.0
 ```
 
+## 硬件
+
+Hark DT-1 用一块 Seeed XIAO nRF54L15 Sense 加一块 402020 锂电池，只需焊两根线，装进 3D 打印外壳后用挂绳佩戴。物料、接线图和外壳见 **[docs/hardware.md](docs/hardware.md)**。
+
+> ⚠️ 动手前请先读其中的[安全须知](docs/hardware.md#安全须知)，包括锂电池、焊接、佩戴，以及录音前征得他人同意。
+
 ## 当前进度与后续计划
 
 - [x] 随身固件 v1：16kHz PDM → 80Hz 高通 + 自动增益 → Opus → BLE 加密传输与静音跳帧
@@ -183,7 +190,8 @@ git push origin main v0.1.0
 - [x] 纯 Go `/v2` 端到端加密盲信箱 + MyGo 跨平台桌面存档管理端 + 双协议可插拔 ASR 测活
 - [ ] **iOS 原生客户端**（待开发：BLE 后台长连、端侧 VAD 与 `/v2` 端到端加密同步，复用同一套硬件与信箱协议）
 - [ ] 蓝牙断连时设备端 Flash 离线补录缓存
-- [ ] 自制超薄 PCB v1 与正式版外壳
+- [x] DT-1 开发板版硬件方案与两款 3D 打印外壳（实物续航待测）
+- [ ] 自制超薄 PCB v1
 
 ## 第三方代码与许可证
 
