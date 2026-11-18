@@ -59,7 +59,10 @@ android {
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
         release {
-            isMinifyEnabled = false
+            // R8 删掉没用到的代码与图标（material-icons-extended 占了大半体积）
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // CI 发版注入持久签名密钥（保证跨版本覆盖升级不丢数据）；本地未配密钥时回退 debug 签名方便直装
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
