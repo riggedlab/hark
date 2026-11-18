@@ -1,11 +1,13 @@
 @file:OptIn(
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
     androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
 
 package io.github.riggedlab.hark
 
 import android.Manifest
+import android.os.SystemClock
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
@@ -19,6 +21,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -41,6 +44,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -207,6 +212,32 @@ internal sealed interface StreamNodeUi {
         override val sortTime: LocalDateTime get() = span.endAt
         override val searchBlob: String get() = span.searchBlob
     }
+}
+
+/**
+ * 正在播放的那一个段落：播放位置落在多句（相邻句的前后余量、多人重叠说话、整段无逐句时间的兜底句）里时，
+ * 只取开始得最晚的那句，保证同一时刻只有一个气泡亮。
+ */
+/** 这一段在某段录音里的起止（秒）；name 为空时取第一段有音频的录音 */
+internal fun ParaUi.audioSpan(name: String?): Triple<Recording, Double, Double>? {
+    val rec = (if (name != null) lines.firstOrNull { it.rec.name == name } else lines.firstOrNull { it.rec.hasAudio })?.rec
+        ?: return null
+    val mine = lines.filter { it.rec.name == rec.name }
+    return Triple(rec, mine.minOf { it.seg.start }, mine.maxOf { it.seg.end })
+}
+
+internal fun activeParaKey(paras: Sequence<ParaUi>, playingName: String?, pos: Double): String? {
+    if (playingName == null) return null
+    var bestKey: String? = null
+    var bestStart = Double.NEGATIVE_INFINITY
+    for (p in paras) for (l in p.lines) {
+        if (l.rec.name != playingName) continue
+        if (pos in (l.seg.start - 0.15)..(l.seg.end + 0.25) && l.seg.start > bestStart) {
+            bestStart = l.seg.start
+            bestKey = p.key
+        }
+    }
+    return bestKey
 }
 
 /** 扁平化气泡流条目：每颗气泡独立进 LazyColumn 回收池，杜绝单卡片内百条气泡一次性全量渲染 */
@@ -927,6 +958,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        val hiddenLenses = HiddenLenses.all(this).keys
+        val visibleLenses = quickLenses.filter { it.id == "all" || it.id !in hiddenLenses }
+
         return FeedPageSnapshot(
             signature = sig,
             totalRecordingCount = stubsDesc.size,
@@ -934,7 +968,7 @@ class MainActivity : ComponentActivity() {
             loadedStubCount = selectedStubsDesc.size,
             hasMoreHistory = hasMore,
             dayEvents = dayEvents,
-            quickLenses = quickLenses,
+            quickLenses = visibleLenses,
         )
     }
 
@@ -1348,6 +1382,7 @@ class MainActivity : ComponentActivity() {
         val clipboard = LocalClipboardManager.current
         val haptic = LocalHapticFeedback.current
         var showStatusPanel by remember { mutableStateOf(false) }
+        val playPos = remember { { if (player.current != null) player.smoothPositionMs() / 1000.0 else -1.0 } }
 
         val recorderMessage by remember {
             AppState.status.map { it.message }.distinctUntilChanged()
@@ -1402,6 +1437,7 @@ class MainActivity : ComponentActivity() {
                                     lenses = feedSnap.quickLenses,
                                     activeLens = activeLens,
                                     onSelectLens = onActiveLensChange,
+                                    onHideLens = { HiddenLenses.hide(this@MainActivity, it.id, it.label) },
                                     hasMoreHistory = feedSnap.hasMoreHistory,
                                     onLoadMore = onLoadMoreHistory,
                                     mode = mode,
@@ -1409,15 +1445,23 @@ class MainActivity : ComponentActivity() {
                                     query = searchQuery,
                                     playingName = player.current?.name,
                                     isPlaying = player.playing,
-                                    playPosSec = if (player.current != null) player.positionMs / 1000.0 else -1.0,
-                                    onTapTurn = { rec, sec ->
-                                        if (player.current?.name == rec.name && abs(player.positionMs / 1000.0 - sec) < 4.0) {
-                                            player.toggle()
-                                        } else {
-                                            if (player.current?.name != rec.name) player.open(rec)
-                                            player.seekTo((sec * 1000).toInt())
-                                        }
+                                    playPos = playPos,
+                                    onTapTurn = { rec, sec, isActive ->
+                                        // 点正在播的那句 = 暂停/继续；点别的句子 = 直接跳过去播
+                                        if (isActive) player.toggle() else player.play(rec, (sec * 1000).toInt())
                                     },
+                                    fastPlay = player.speed > 1f,
+                                    onHold = { rec, startSec, endSec, isActive ->
+                                        // 按住：只在这张卡片里 2 倍速，播到卡片结尾就停
+                                        if (!isActive) player.play(rec, (startSec * 1000).toInt())
+                                        player.changeSpeed(2f)
+                                        player.limitTo((endSec * 1000).toInt() + 250)
+                                    },
+                                    onHoldEnd = {
+                                        player.changeSpeed(1f)
+                                        player.limitTo(null)
+                                    },
+                                    onScrub = { rec, sec -> player.play(rec, (sec * 1000).toInt()) },
                                     onEditPlace = { editingPlace = it },
                                     onEditSpeaker = { spkId -> editing = Speakers.resolve(this@MainActivity, spkId) },
                                     onCopyEvent = { text ->
@@ -1437,11 +1481,8 @@ class MainActivity : ComponentActivity() {
                                     unconfigured = needsConfig,
                                     query = searchQuery,
                                     playingName = player.current?.name,
-                                    playPosSec = if (player.current != null) player.positionMs / 1000.0 else -1.0,
-                                    onSeekLine = { rec, sec ->
-                                        if (player.current?.name != rec.name) player.open(rec)
-                                        player.seekTo((sec * 1000).toInt())
-                                    },
+                                    playPos = playPos,
+                                    onSeekLine = { rec, sec -> player.play(rec, (sec * 1000).toInt()) },
                                     onEditPlace = { editingPlace = it },
                                     onEditSpeaker = { spkId -> editing = Speakers.resolve(this@MainActivity, spkId) },
                                     onCopyEvent = { text ->
@@ -2255,6 +2296,7 @@ private fun DialogueStreamView(
     lenses: List<FeedFilterLens>,
     activeLens: String,
     onSelectLens: (String) -> Unit,
+    onHideLens: (FeedFilterLens) -> Unit,
     hasMoreHistory: Boolean,
     onLoadMore: () -> Unit,
     mode: WorkMode,
@@ -2262,8 +2304,13 @@ private fun DialogueStreamView(
     query: String,
     playingName: String?,
     isPlaying: Boolean,
-    playPosSec: Double,
-    onTapTurn: (Recording, Double) -> Unit,
+    /** 当前播放位置（秒），逐帧平滑；只在需要时读取，避免整列表每 100ms 重组 */
+    playPos: () -> Double,
+    onTapTurn: (Recording, Double, Boolean) -> Unit,
+    fastPlay: Boolean,
+    onHold: (Recording, Double, Double, Boolean) -> Unit,
+    onHoldEnd: () -> Unit,
+    onScrub: (Recording, Double) -> Unit,
     onEditPlace: (Place) -> Unit,
     onEditSpeaker: (String) -> Unit,
     onCopyEvent: (String) -> Unit,
@@ -2357,6 +2404,13 @@ private fun DialogueStreamView(
         }
     }
 
+    val activeKey by remember(flatRows, playingName) {
+        derivedStateOf {
+            activeParaKey(flatRows.asSequence().mapNotNull { (it as? FlatDialogueRow.Bubble)?.para }, playingName, playPos())
+        }
+    }
+    FollowPlayback(listState, activeKey, isPlaying) { key -> flatRows.indexOfFirst { it.key == key } }
+
     BindLazyPagination(
         listState = listState,
         hasMore = hasMoreHistory && q.isEmpty() && activeLens == "all",
@@ -2372,20 +2426,46 @@ private fun DialogueStreamView(
             ) {
                 items(lenses, key = { it.id }) { lens ->
                     val selected = activeLens == lens.id
-                    Surface(
-                        onClick = { onSelectLens(lens.id) },
-                        shape = CircleShape,
-                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerLowest,
-                        contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        modifier = Modifier.pressScale(),
-                    ) {
-                        Text(
-                            text = lens.label,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        )
+                    var menuOpen by remember { mutableStateOf(false) }
+                    val haptic = LocalHapticFeedback.current
+                    Box {
+                        Surface(
+                            shape = CircleShape,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerLowest,
+                            contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            border = if (selected) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier
+                                .pressScale()
+                                .clip(CircleShape)
+                                .combinedClickable(
+                                    onClick = { onSelectLens(lens.id) },
+                                    // 「全部」不能隐藏
+                                    onLongClick = if (lens.id == "all") null else {
+                                        {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            menuOpen = true
+                                        }
+                                    },
+                                ),
+                        ) {
+                            Text(
+                                text = lens.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text("从快捷栏隐藏") },
+                                leadingIcon = { Icon(Icons.Rounded.VisibilityOff, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    if (selected) onSelectLens("all")
+                                    onHideLens(lens)
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -2421,17 +2501,31 @@ private fun DialogueStreamView(
                     )
                     is FlatDialogueRow.Bubble -> {
                         val p = row.para
-                        val paraActive = playingName != null && p.lines.any { l ->
-                            l.rec.name == playingName && playPosSec in (l.seg.start - 0.15)..(l.seg.end + 0.25)
-                        }
+                        val paraActive = p.key == activeKey
                         DialogueBubbleRow(
                             p = p,
                             highlightQuery = q,
                             active = paraActive,
                             isPlaying = paraActive && isPlaying,
+                            progress = if (!paraActive) null else {
+                                {
+                                    val (_, st, ed) = p.audioSpan(playingName) ?: return@DialogueBubbleRow 0f
+                                    if (ed <= st) 0f else ((playPos() - st) / (ed - st)).coerceIn(0.0, 1.0).toFloat()
+                                }
+                            },
                             onTapBubble = {
                                 val target = p.lines.firstOrNull { it.rec.hasAudio } ?: return@DialogueBubbleRow
-                                onTapTurn(target.rec, target.seg.start)
+                                onTapTurn(target.rec, target.seg.start, paraActive)
+                            },
+                            fast = paraActive && fastPlay,
+                            onHold = { on ->
+                                if (!on) { onHoldEnd(); return@DialogueBubbleRow }
+                                val (rec, st, ed) = p.audioSpan(if (paraActive) playingName else null)
+                                    ?: return@DialogueBubbleRow
+                                onHold(rec, st, ed, paraActive)
+                            },
+                            onScrub = if (!paraActive) null else { f ->
+                                p.audioSpan(playingName)?.let { (rec, st, ed) -> onScrub(rec, st + f * (ed - st)) }
                             },
                             onEditSpeaker = onEditSpeaker,
                         )
@@ -2530,10 +2624,29 @@ private fun DialogueBubbleRow(
     highlightQuery: String,
     active: Boolean,
     isPlaying: Boolean,
+    /** 本句播放进度 0..1，只在本句正在播放时非空；在绘制阶段读取，不触发重组 */
+    progress: (() -> Float)?,
     onTapBubble: () -> Unit,
+    /** 按住开始 2 倍速（true），松手恢复（false） */
+    onHold: (Boolean) -> Unit,
+    fast: Boolean,
+    /** 正在播放时左右拖动定位，参数是卡片内的比例 0..1；不在播放时为 null（不拦截横滑，翻页不受影响） */
+    onScrub: ((Float) -> Unit)?,
     onEditSpeaker: (String) -> Unit,
 ) {
     val deck = DeckTheme.colors
+    val haptic = LocalHapticFeedback.current
+    var holding by remember { mutableStateOf(false) }
+    var dragFrac by remember { mutableStateOf<Float?>(null) }
+    // 手势只在气泡生命周期内启动一次，回调用最新值，避免界面刷新时打断正在按住/拖动的手势
+    val tapNow by rememberUpdatedState(onTapBubble)
+    val holdNow by rememberUpdatedState(onHold)
+    val scrubNow by rememberUpdatedState(onScrub)
+    // 播放中逐帧刷新进度填充（只重绘本气泡）
+    var frame by remember { mutableLongStateOf(0L) }
+    if (progress != null && isPlaying) {
+        LaunchedEffect(Unit) { while (true) withFrameMillis { frame = it } }
+    }
     val colors = MaterialTheme.colorScheme
     val isSelf = p.isSelf && !p.isBackgroundNoise
 
@@ -2602,59 +2715,145 @@ private fun DialogueBubbleRow(
                 p.affectCue?.let { cue ->
                     HumanCuePill(cue, kind = if (p.isPositive) CueKind.POSITIVE else if (p.isTense) CueKind.TENSE else CueKind.NEUTRAL)
                 }
-                Text(
-                    text = p.timeHm,
-                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                    color = colors.onSurfaceVariant.copy(alpha = 0.65f),
-                )
+                Crossfade(targetState = active, animationSpec = tween(160), label = "metaPlaying") { on ->
+                    if (on) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(
+                                imageVector = if (isPlaying) Icons.Rounded.GraphicEq else Icons.Rounded.Pause,
+                                contentDescription = if (isPlaying) "正在播放" else "已暂停",
+                                modifier = Modifier.size(13.dp),
+                                tint = deck.accentBlue,
+                            )
+                            MiniStaticWaveBars(active = isPlaying, tint = deck.accentBlue)
+                            if (fast) {
+                                Text(
+                                    "2×",
+                                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = deck.accentBlue,
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = p.timeHm,
+                            style = MaterialTheme.typography.labelSmall.merge(TabularMono),
+                            color = colors.onSurfaceVariant.copy(alpha = 0.65f),
+                        )
+                    }
+                }
             }
 
+            val borderColor by animateColorAsState(
+                targetValue = if (active) deck.accentBlue.copy(alpha = 0.6f) else colors.outlineVariant,
+                animationSpec = tween(180),
+                label = "bubbleBorder",
+            )
+            val gestures = if (!p.hasAnyAudio) Modifier else Modifier
+                .clip(bubbleShape)
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            tapNow()
+                        },
+                        onLongPress = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            holding = true
+                            holdNow(true)
+                        },
+                        onPress = {
+                            tryAwaitRelease()
+                            if (holding) {
+                                holding = false
+                                holdNow(false)
+                            }
+                        },
+                    )
+                }
+                .let { m ->
+                    // 只有正在播放的卡片拦截横向拖动；其他卡片不拦，左右翻页照常
+                    if (onScrub == null) return@let m
+                    m.pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { o -> dragFrac = (o.x / size.width).coerceIn(0f, 1f) },
+                            onHorizontalDrag = { change, _ ->
+                                change.consume()
+                                dragFrac = (change.position.x / size.width).coerceIn(0f, 1f)
+                            },
+                            onDragEnd = {
+                                dragFrac?.let { f -> scrubNow?.invoke(f) }
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                dragFrac = null
+                            },
+                            onDragCancel = { dragFrac = null },
+                        )
+                    }
+                }
             Surface(
-                onClick = onTapBubble,
-                enabled = p.hasAnyAudio,
                 shape = bubbleShape,
                 color = bubbleBg,
                 border = if (!isSelf && !p.isBackgroundNoise) {
-                    BorderStroke(1.dp, if (active) deck.accentBlue.copy(alpha = 0.55f) else colors.outlineVariant)
+                    BorderStroke(1.dp, borderColor)
                 } else if (active) {
-                    BorderStroke(1.dp, deck.accentBlue.copy(alpha = 0.55f))
+                    BorderStroke(1.dp, borderColor)
                 } else null,
                 shadowElevation = if (isSelf || p.isBackgroundNoise) 0.dp else 1.dp,
-                modifier = Modifier.pressScale(enabled = p.hasAnyAudio, pressedScale = 0.985f),
+                modifier = Modifier.pressScale(enabled = p.hasAnyAudio, pressedScale = 0.985f).then(gestures),
             ) {
-                Column(Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
+                val fill = deck.accentBlue.copy(alpha = if (isSelf) 0.16f else 0.10f)
+                Column(
+                    Modifier
+                        .drawBehind {
+                            frame // 逐帧失效重绘
+                            val f = dragFrac ?: progress?.invoke() ?: return@drawBehind
+                            if (f > 0f) drawRect(fill, size = size.copy(width = size.width * f))
+                        }
+                        .padding(horizontal = 13.dp, vertical = 10.dp),
+                ) {
                     Text(
                         text = highlightMatches(p.text, highlightQuery),
                         style = MaterialTheme.typography.bodyLarge,
                         color = bubbleFg,
                     )
-
-                    AnimatedVisibility(visible = active) {
-                        Column {
-                            Spacer(Modifier.height(7.dp))
-                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
-                            Spacer(Modifier.height(6.dp))
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Icon(
-                                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                                    contentDescription = if (isPlaying) "暂停" else "播放",
-                                    modifier = Modifier.size(15.dp),
-                                    tint = deck.accentBlue,
-                                )
-                                MiniStaticWaveBars(active = isPlaying, tint = deck.accentBlue)
-                                Text(
-                                    text = MainActivity.fmtDuration(p.durationSec.toDouble()),
-                                    style = MaterialTheme.typography.labelSmall.merge(TabularMono),
-                                    color = deck.accentBlue,
-                                )
-                            }
-                        }
-                    }
                 }
             }
+        }
+    }
+}
+
+/**
+ * 播放推进到屏幕外的句子时，平滑滚动让它留在视野上部；用户 4 秒内手动滑过就不抢。
+ * 只在「正在播的句子」变化时检查一次，点击当前可见的句子不会触发滚动。
+ */
+@Composable
+private fun FollowPlayback(
+    listState: LazyListState,
+    activeKey: String?,
+    isPlaying: Boolean,
+    indexOf: (String) -> Int,
+) {
+    var autoScrolling by remember { mutableStateOf(false) }
+    var lastUserScrollAt by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling && !autoScrolling) lastUserScrollAt = SystemClock.uptimeMillis()
+        }
+    }
+    LaunchedEffect(activeKey) {
+        val key = activeKey ?: return@LaunchedEffect
+        if (!isPlaying || SystemClock.uptimeMillis() - lastUserScrollAt < 4_000) return@LaunchedEffect
+        val idx = indexOf(key).takeIf { it >= 0 } ?: return@LaunchedEffect
+        val info = listState.layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == idx }
+        val fullyVisible = item != null && item.offset >= info.viewportStartOffset &&
+            item.offset + item.size <= info.viewportEndOffset - info.afterContentPadding
+        if (fullyVisible) return@LaunchedEffect
+        autoScrolling = true
+        try {
+            listState.animateScrollToItem(idx, scrollOffset = -(info.viewportSize.height / 4))
+        } finally {
+            autoScrolling = false
         }
     }
 }
@@ -2705,7 +2904,7 @@ private fun EditorialStreamView(
     unconfigured: Boolean,
     query: String,
     playingName: String?,
-    playPosSec: Double,
+    playPos: () -> Double,
     onSeekLine: (Recording, Double) -> Unit,
     onEditPlace: (Place) -> Unit,
     onEditSpeaker: (String) -> Unit,
@@ -2773,6 +2972,12 @@ private fun EditorialStreamView(
         }
     }
 
+    val activeKey by remember(flatRows, playingName) {
+        derivedStateOf {
+            activeParaKey(flatRows.asSequence().mapNotNull { (it as? FlatEditorialRow.ExpandedTurn)?.para }, playingName, playPos())
+        }
+    }
+
     BindLazyPagination(
         listState = listState,
         hasMore = hasMoreHistory && q.isEmpty(),
@@ -2831,9 +3036,7 @@ private fun EditorialStreamView(
                 )
                 is FlatEditorialRow.ExpandedTurn -> {
                     val p = row.para
-                    val linePlaying = playingName != null && p.lines.any { l ->
-                        l.rec.name == playingName && playPosSec in (l.seg.start - 0.15)..(l.seg.end + 0.25)
-                    }
+                    val linePlaying = p.key == activeKey
                     EditorialTimelineRow(
                         timeHm = "",
                         isQuiet = false,

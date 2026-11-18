@@ -267,3 +267,22 @@ object Features {
     fun setLocation(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean(LOCATION, on).apply()
     fun setScene(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean(SCENE, on).apply()
 }
+
+/** 首页快捷标签里被用户长按隐藏的那些（id -> 隐藏时的显示名，用于设置页恢复列表） */
+object HiddenLenses {
+    private const val KEY = "hidden_lenses"
+    private const val SEP = "\u0001"
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
+
+    fun all(ctx: Context): Map<String, String> =
+        (prefs(ctx).getStringSet(KEY, null) ?: emptySet())
+            .mapNotNull { e -> e.split(SEP, limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }
+            .toMap()
+
+    fun hide(ctx: Context, id: String, label: String) = save(ctx, all(ctx) + (id to label))
+    fun restore(ctx: Context, id: String) = save(ctx, all(ctx) - id)
+
+    private fun save(ctx: Context, m: Map<String, String>) =
+        prefs(ctx).edit().putStringSet(KEY, m.map { (id, label) -> "$id$SEP$label" }.toSet()).apply()
+}
