@@ -97,6 +97,7 @@ internal fun SettingsScreen(
     var feedStyle by remember { mutableStateOf(Config.feedStyle(ctx)) }
     var locationOn by remember { mutableStateOf(Features.location(ctx)) }
     var sceneOn by remember { mutableStateOf(Features.scene(ctx)) }
+    var hiddenLenses by remember { mutableStateOf(HiddenLenses.all(ctx)) }
     var committedMode by remember { mutableStateOf(Config.mode(ctx)) }
     var selectedMode by remember { mutableStateOf(committedMode) }
 
@@ -554,6 +555,27 @@ internal fun SettingsScreen(
                             ) { Text("查看") }
                         },
                     )
+                    if (hiddenLenses.isNotEmpty()) {
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        ListItem(
+                            colors = rowColors,
+                            leadingContent = { Icon(Icons.Rounded.VisibilityOff, contentDescription = null) },
+                            headlineContent = { Text("已隐藏的快捷标签") },
+                            supportingContent = { Text("首页顶部长按标签可隐藏，点恢复放回去") },
+                        )
+                        hiddenLenses.entries.sortedBy { it.value }.forEach { (id, label) ->
+                            ListItem(
+                                colors = rowColors,
+                                headlineContent = { Text(label) },
+                                trailingContent = {
+                                    TextButton(onClick = {
+                                        HiddenLenses.restore(ctx, id)
+                                        hiddenLenses = HiddenLenses.all(ctx)
+                                    }) { Text("恢复") }
+                                },
+                            )
+                        }
+                    }
                 }
             }
 

@@ -4,8 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.compose.ui.test.*
-import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
 import org.json.JSONArray
@@ -20,7 +18,9 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config as RoboConfig
 import org.robolectric.annotation.GraphicsMode
-import org.robolectric.shadows.ShadowWindowManagerGlobal
+import org.robolectric.shadows.ShadowMediaPlayer
+import org.robolectric.shadows.util.DataSource
+import org.robolectric.util.ReflectionHelpers
 import java.io.File
 import java.io.FileOutputStream
 
@@ -281,7 +281,7 @@ class UiWalkthroughTest {
     }
 
     @Test
-    fun longPressTargetsSingleSentenceInBothTimelineStyles() {
+    fun cardActionTargetsSingleSentenceInBothTimelineStyles() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val name = "20261112-164000.opus"
         val file = File(Transcripts.dir(ctx), "$name.json")
@@ -294,20 +294,16 @@ class UiWalkthroughTest {
         AppState.update { it.copy(textVersion = it.textVersion + 1) }
         rule.waitUntil(5_000) { rule.onAllNodesWithText("第二句命中。", substring = true).fetchSemanticsNodes().isNotEmpty() }
 
-        fun longPressSecondSentence() {
-            val node = rule.onNodeWithText("第二句命中。", substring = true)
-            val results = mutableListOf<TextLayoutResult>()
-            node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(results) }
-            val layout = results.single()
-            val offset = layout.layoutInput.text.text.indexOf("第二句命中。")
-            node.performTouchInput { longClick(layout.getBoundingBox(offset).center) }
-            rule.waitForIdle()
+        fun chooseSecondSentence() {
+            val card = hasTestTag("speaker-label-card") and hasAnyDescendant(hasText("第二句命中。", substring = true))
+            rule.onNode(hasContentDescription("标注说话人") and hasAnyAncestor(card)).performClick()
+            rule.onNodeWithText("选择要标注的句子").assertIsDisplayed()
+            rule.onNode(hasText("第二句命中。") and hasAnyAncestor(isDialog())).performClick()
             rule.onNodeWithText("这是我").assertIsDisplayed()
             rule.onNodeWithText("不是我").assertIsDisplayed()
-            // Dialog 里的原文只能是命中的句子，不能是合并后的整个段落。
-            rule.onNodeWithText("第二句命中。").assertIsDisplayed()
+            rule.onNode(hasText("第二句命中。") and hasAnyAncestor(isDialog())).assertIsDisplayed()
         }
-        longPressSecondSentence()
+        chooseSecondSentence()
         captureAllWindows("10-voice-label-dialogue")
         rule.onNodeWithText("这是…（选已命名的人）").performClick()
         rule.waitForIdle()
@@ -318,10 +314,54 @@ class UiWalkthroughTest {
         rule.onNodeWithText("无框左轴流").performClick()
         rule.onNodeWithContentDescription("返回").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("展开全篇 2 段 · 已静默 1 段背景声").performClick()
-        longPressSecondSentence()
-        captureAllWindows("12-voice-label-editorial")
+        // 收起的长对话没有显示原句。可见的短记入口直接打开单句标注。
+        rule.onNodeWithContentDescription("标注说话人").performClick()
+        rule.onNodeWithText("选择要标注的句子").assertDoesNotExist()
+        rule.onNodeWithText("这是我").assertIsDisplayed()
         rule.onNodeWithText("取消").performClick()
+
+        rule.onNodeWithText("展开全篇 2 段 · 已静默 1 段背景声").performClick()
+        chooseSecondSentence()
+        captureAllWindows("12-voice-label-editorial")
+        rule.onNodeWithText("不是我").performClick()
+        rule.waitUntil(5_000) { rule.onAllNodesWithText("标注说话人").fetchSemanticsNodes().isEmpty() }
+        val labels = JSONObject(File(ctx.filesDir, "voice_labels.json").readText()).getJSONObject(name)
+        assertEquals(setOf("9.6:10.2"), labels.keys().asSequence().toSet())
+        assertEquals(Voiceprint.NOT_SELF, labels.getString("9.6:10.2"))
+    }
+
+    @Test
+    fun holdingBubbleTextPlaysAtDoubleSpeedUntilRelease() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val name = "20261112-164000.opus"
+        val audio = File(RecorderService.chunkDir(ctx), name)
+        ShadowMediaPlayer.addMediaInfo(
+            DataSource.toDataSource(audio.absolutePath),
+            ShadowMediaPlayer.MediaInfo(298_000, 0),
+        )
+        val player = ReflectionHelpers.getField<Player>(rule.activity, "player")
+        val text = "先把手机直连和云端信箱两条路径做干净"
+        rule.waitUntil(5_000) { rule.onNodeWithText(text, substring = true).isDisplayed() }
+        val bubble = rule.onNodeWithText(text, substring = true)
+        // 自动推进会让播放进度动画在断言前跑到卡片结尾。
+        rule.mainClock.autoAdvance = false
+        try {
+            bubble.performTouchInput {
+                down(center)
+                advanceEventTime(650)
+                move()
+            }
+            rule.runOnUiThread {
+                assertEquals(name, player.current?.name)
+                assertTrue("playback stopped at ${player.positionMs} ms", player.playing)
+                assertEquals(2f, player.speed, 0f)
+            }
+        } finally {
+            bubble.performTouchInput { up() }
+            rule.mainClock.autoAdvance = true
+        }
+        rule.onNodeWithText("这是我").assertDoesNotExist()
+        rule.runOnIdle { assertEquals(1f, player.speed, 0f) }
     }
 
     @Test
