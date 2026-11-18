@@ -741,8 +741,8 @@ class MainActivity : ComponentActivity() {
                     proximity = prox,
                     voiceCue = vCue,
                     affectCue = aCue,
-                    isPositive = moodPair?.first == "positive" || "笑声" in vTags,
-                    isTense = moodPair?.first == "negative",
+                    isPositive = shownMood(moodPair?.second) == "positive" || "笑声" in vTags,
+                    isTense = shownMood(moodPair?.second) == "negative",
                     isBackgroundNoise = isBg,
                 )
             }
@@ -836,8 +836,8 @@ class MainActivity : ComponentActivity() {
                 sceneSummary = sceneSummary,
                 eventVoiceCue = eventVoiceCue,
                 eventAffectCue = eventAffectCue,
-                isPositive = eventMoodPair?.first == "positive" || "笑声" in eventVocalTags,
-                isTense = eventMoodPair?.first == "negative",
+                isPositive = shownMood(eventMoodPair?.second) == "positive" || "笑声" in eventVocalTags,
+                isTense = shownMood(eventMoodPair?.second) == "negative",
                 parasNewestFirst = paraUisAsc.asReversed(),
                 fgParaCount = fgParasAsc.size,
                 bgParaCount = paraUisAsc.size - fgParasAsc.size,
@@ -1089,7 +1089,7 @@ class MainActivity : ComponentActivity() {
                 placeLabel = place?.label,
                 sceneSummary = recSceneSummary,
                 affectCue = recAffect,
-                isPositive = recMoodPair?.first == "positive",
+                isPositive = shownMood(recMoodPair?.second) == "positive",
                 transcriptPreview = preview,
                 baseStatus = baseStatus,
                 searchBlob = searchBlob,
@@ -4440,13 +4440,28 @@ private fun humanVoiceCue(proximity: String?, avgDb: Float?): String? = when (pr
     }
 }
 
+/**
+ * 情绪只在模型很有把握时才展示。用 2026-11-18 手机上 4300+ 句真实转写抽查：
+ * |分| 0.35~0.5 基本是普通话被误标，0.5~0.6 对错参半，0.6 以上大多可信。
+ */
+internal const val MOOD_SHOW_THRESHOLD = 0.6f
+
+/** 达到展示门槛的情绪："positive" / "negative"，否则 null */
+internal fun shownMood(moodScore: Float?): String? = when {
+    moodScore == null -> null
+    moodScore >= MOOD_SHOW_THRESHOLD -> "positive"
+    moodScore <= -MOOD_SHOW_THRESHOLD -> "negative"
+    else -> null
+}
+
 private fun humanAffectCue(mood: String?, moodScore: Float?, vocalTags: List<String>): String? {
     val firstTag = vocalTags.firstOrNull { it.isNotBlank() }
+    val shown = shownMood(moodScore)
     return when {
-        firstTag != null && mood == "positive" -> if (firstTag == "笑声") "愉悦 · 笑声" else "愉悦 · $firstTag"
+        firstTag != null && shown == "positive" -> if (firstTag == "笑声") "愉悦 · 笑声" else "愉悦 · $firstTag"
         firstTag != null -> firstTag
-        mood == "positive" && (moodScore == null || moodScore >= 0.35f) -> "愉悦"
-        mood == "negative" && (moodScore == null || moodScore <= -0.35f) -> "语气急促"
+        shown == "positive" -> "愉悦"
+        shown == "negative" -> "语气急促"
         else -> null
     }
 }
