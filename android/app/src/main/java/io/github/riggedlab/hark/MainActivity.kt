@@ -1818,7 +1818,9 @@ private fun BindLazyPagination(
 ) {
     val shouldLoadMore by remember(listState, hasMore, itemCount) {
         derivedStateOf {
-            if (!hasMore || itemCount <= 0) false
+            // 当前页一条可显示的都没有（如最新一批录音全未出字）时也要继续往前翻，否则永远卡在空状态
+            if (!hasMore) false
+            else if (itemCount <= 0) true
             else {
                 val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 lastVisible >= (itemCount - 6).coerceAtLeast(0)
