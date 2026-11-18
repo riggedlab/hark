@@ -70,6 +70,7 @@ internal object SceneAndMood {
 
     /** 读取某段录音的环境音标签（优先独立 sidecar，兼容转写内嵌字段，不依赖 ASR 成功与否） */
     fun getSceneTags(ctx: Context, name: String): List<SceneTag> {
+        if (!Features.scene(ctx)) return emptyList()
         sceneMem[name]?.let { return it }
         val sf = File(sceneDir(ctx), "$name.json")
         if (sf.exists()) {
@@ -158,6 +159,7 @@ internal object SceneAndMood {
             )
             ?: emptyList()
 
+        val sceneOn = Features.scene(ctx)
         for (opus in opusFiles) {
             val name = opus.name
             val sidecarFile = File(sceneDir(ctx), "$name.json")
@@ -176,12 +178,13 @@ internal object SceneAndMood {
                     } == true)
             }.getOrDefault(false)
 
-            if (hasSidecar && !trNeedsAudio) continue
+            // 环境音识别关闭时只为心情/分贝补算，不跑环境音模型、不写 sidecar（重新打开后再补）
+            if ((hasSidecar || !sceneOn) && !trNeedsAudio) continue
 
             val pcm = runCatching { Vad.decode16k(opus) }.getOrNull()
             if (pcm == null || pcm.isEmpty()) continue
 
-            val tags = if (hasSidecar) getSceneTags(ctx, name) else {
+            val tags = if (hasSidecar || !sceneOn) getSceneTags(ctx, name) else {
                 detectSceneTags(ctx, pcm).also { saveSceneSidecar(ctx, name, it) }
             }
 
@@ -724,7 +727,8 @@ internal object SceneAndMood {
         for (tag in sceneTags) {
             sceneArr.put(JSONObject().put("label", tag.label).put("score", tag.score.toDouble()))
         }
-        root.put("scene_tags", sceneArr)
+        // 环境音识别关闭时 sceneTags 为空：保留文件里原有的 scene_tags，不覆盖
+        if (sceneTags.isNotEmpty()) root.put("scene_tags", sceneArr)
         enrichSegmentsMoodInternal(ctx, pcm16k, root)
         root.put("sm_audio_ver", SCHEMA_VERSION)
         root.put("sm_text_ver", SCHEMA_VERSION)

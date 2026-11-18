@@ -253,3 +253,17 @@ data class Config(val serverUrl: String, val token: String, val e2eeKey: ByteArr
         }
     }
 }
+
+/** 本机可选的识别功能，默认开启；关闭后不再采集，已有数据保留但不显示 */
+object Features {
+    private const val LOCATION = "feature_location"
+    private const val SCENE = "feature_scene"
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
+
+    fun location(ctx: Context): Boolean = prefs(ctx).getBoolean(LOCATION, true)
+    fun scene(ctx: Context): Boolean = prefs(ctx).getBoolean(SCENE, true)
+
+    fun setLocation(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean(LOCATION, on).apply()
+    fun setScene(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean(SCENE, on).apply()
+}

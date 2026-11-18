@@ -95,6 +95,8 @@ internal fun SettingsScreen(
     val scope = rememberCoroutineScope()
 
     var feedStyle by remember { mutableStateOf(Config.feedStyle(ctx)) }
+    var locationOn by remember { mutableStateOf(Features.location(ctx)) }
+    var sceneOn by remember { mutableStateOf(Features.scene(ctx)) }
     var committedMode by remember { mutableStateOf(Config.mode(ctx)) }
     var selectedMode by remember { mutableStateOf(committedMode) }
 
@@ -490,18 +492,43 @@ internal fun SettingsScreen(
                     ListItem(
                         colors = rowColors,
                         leadingContent = { Icon(Icons.Rounded.Place, contentDescription = null, tint = DeckTheme.colors.place) },
-                        headlineContent = { Text("自动记录对话地点") },
-                        supportingContent = { Text("仅存储在手机本机，绝不上传服务器") },
+                        headlineContent = { Text("地点识别") },
+                        supportingContent = {
+                            Text(
+                                when {
+                                    !locationOn -> "已关闭，不再记录位置"
+                                    !hasLocation -> "未授予定位权限，打开开关去授权"
+                                    else -> "自动记录对话地点，仅存在手机本机"
+                                },
+                            )
+                        },
                         trailingContent = {
-                            if (hasLocation) {
-                                Text("已授权", style = MaterialTheme.typography.labelMedium, color = DeckTheme.colors.ledGreen)
-                            } else {
-                                OutlinedButton(
-                                    onClick = onRequestLocation,
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.pressScale(),
-                                ) { Text("开启定位") }
-                            }
+                            Switch(
+                                checked = locationOn && hasLocation,
+                                onCheckedChange = { on ->
+                                    locationOn = on
+                                    Features.setLocation(ctx, on)
+                                    if (on && !hasLocation) onRequestLocation()
+                                },
+                            )
+                        },
+                    )
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        colors = rowColors,
+                        leadingContent = { Icon(Icons.Rounded.GraphicEq, contentDescription = null) },
+                        headlineContent = { Text("环境音识别") },
+                        supportingContent = {
+                            Text(if (sceneOn) "在本机识别车流、音乐、安静等环境声，不上传" else "已关闭，不再识别环境声")
+                        },
+                        trailingContent = {
+                            Switch(
+                                checked = sceneOn,
+                                onCheckedChange = { on ->
+                                    sceneOn = on
+                                    Features.setScene(ctx, on)
+                                },
+                            )
                         },
                     )
                     HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)

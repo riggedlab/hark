@@ -469,8 +469,10 @@ class MainActivity : ComponentActivity() {
 
     private fun neededPermissions(): Array<String> = buildList {
         addAll(BlePermissions.required(Build.VERSION.SDK_INT))
-        if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.ACCESS_FINE_LOCATION)
-        add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (Features.location(this@MainActivity)) {
+            if (Build.VERSION.SDK_INT >= 31) add(Manifest.permission.ACCESS_FINE_LOCATION)
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
         if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
     }.toTypedArray()
 
@@ -908,7 +910,7 @@ class MainActivity : ComponentActivity() {
         val namedSpeakers = roster.values
             .filter { it.mergedInto == null && it.id !in selfIds && it.name != null }
             .take(4)
-        val topPlaces = Places.all(this).filter { it.mergedInto == null }.asReversed().take(2)
+        val topPlaces = if (!Features.location(this)) emptyList() else Places.all(this).filter { it.mergedInto == null }.asReversed().take(2)
         val quickLenses = buildList {
             add(FeedFilterLens("all", "全部"))
             if (selfIds.isNotEmpty() || allEventsAsc.any { ev -> ev.parasNewestFirst.any { it.isSelf && !it.isBackgroundNoise } }) {
@@ -992,6 +994,7 @@ class MainActivity : ComponentActivity() {
 
     /** 按需构建足迹列表，按最近到访时间从近到远排序 */
     private fun buildPlacesSnapshot(): List<PlaceCardUi> {
+        if (!Features.location(this)) return emptyList()
         val allPlaces = Places.all(this)
         if (allPlaces.isEmpty()) return emptyList()
         val placeStats = Places.stats(this)
@@ -1474,6 +1477,7 @@ class MainActivity : ComponentActivity() {
                             )
                             else -> PlacesPageView(
                                 places = places,
+                                locationEnabled = remember(configVersion) { Features.location(this@MainActivity) },
                                 hasLocation = hasLocation,
                                 onRequestLocation = { requestLocation() },
                                 onRename = { editingPlace = it },
@@ -3549,6 +3553,7 @@ private fun PeoplePageView(
 @Composable
 private fun PlacesPageView(
     places: List<PlaceCardUi>,
+    locationEnabled: Boolean,
     hasLocation: Boolean,
     onRequestLocation: () -> Unit,
     onRename: (Place) -> Unit,
@@ -3557,7 +3562,15 @@ private fun PlacesPageView(
 ) {
     val deck = DeckTheme.colors
     PageList {
-        if (places.isEmpty()) {
+        if (!locationEnabled) {
+            item(key = "places_off") {
+                EmptyStateCard(
+                    icon = Icons.Rounded.LocationOff,
+                    title = "地点识别已关闭",
+                    body = "可在设置里重新开启。已有足迹仍保留在这部手机上。",
+                )
+            }
+        } else if (places.isEmpty()) {
             item(key = "empty_places") {
                 EmptyStateCard(
                     icon = if (hasLocation) Icons.Rounded.Place else Icons.Rounded.LocationOff,

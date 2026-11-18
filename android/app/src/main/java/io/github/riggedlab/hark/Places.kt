@@ -106,6 +106,7 @@ object Places {
 
     /** 某个时刻在哪儿：取时间最接近的一次定位 */
     fun at(ctx: Context, time: LocalDateTime): Place? {
+        if (!Features.location(ctx)) return null
         val ms = time.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val f = fixes(ctx).minByOrNull { abs(it.t - ms) } ?: return null
         if (abs(f.t - ms) > MATCH_WINDOW_MS) return null
@@ -161,6 +162,7 @@ object Places {
 
     /** 补查之前没查到名字的地点（比如当时没网） */
     fun backfill(ctx: Context) {
+        if (!Features.location(ctx)) return
         val missing = all(ctx).filter { it.auto == null }
         if (missing.isEmpty()) return
         val found = missing.associate { it.id to geocode(ctx, it.lat, it.lon) }.filterValues { it.first != null }
@@ -207,6 +209,7 @@ object Places {
     /** 取一次当前位置（异步），取到就记下来。没权限或者定位关了就什么都不做 */
     @SuppressLint("MissingPermission")
     fun requestFix(ctx: Context) {
+        if (!Features.location(ctx)) return
         if (!hasPermission(ctx)) return
         val lm = ctx.getSystemService(LocationManager::class.java) ?: return
         // 只用网络定位（基站 + Wi-Fi），不开 GPS：几乎不耗电，误差几十到一两百米，分辨小区、公司够用

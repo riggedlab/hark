@@ -206,7 +206,7 @@ class RecorderService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // location 提权失败时退回蓝牙类型；回退也由外层捕获，不能因缺权限崩溃。
                 val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                val withLoc = if (Places.hasPermission(this)) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else base
+                val withLoc = if (Features.location(this) && Places.hasPermission(this)) base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else base
                 if (withLoc != base) {
                     try { startForeground(NOTIF_ID, n, withLoc) }
                     catch (_: RuntimeException) { startForeground(NOTIF_ID, n, base) }
