@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/riggedlab/hark/internal/asr"
 	"github.com/riggedlab/hark/internal/e2ee"
@@ -357,14 +358,76 @@ func TestDashScopePermanentFailuresAreSkippedAcrossWorkerPolls(t *testing.T) {
 		if !errors.Is(err, want) {
 			t.Fatalf("readTimeout=%v error=%v", readTimeout, err)
 		}
-		if err := NewEngine(cfg, store, nil).processOne(context.Background(), cfg, key, client, iid); err != nil {
-			t.Fatal(err)
+		if err := NewEngine(cfg, store, nil).processOne(context.Background(), cfg, key, client, iid); !errors.Is(err, errASRSkipped) {
+			t.Fatalf("expected persistent skip, got %v", err)
 		}
 		if calls != 1 || downloads != 1 {
 			t.Fatalf("readTimeout=%v calls=%d downloads=%d", readTimeout, calls, downloads)
 		}
 		store.Close()
 		srv.Close()
+	}
+}
+
+func TestSkippedOnlyBatchBacksOffAndHonorsCancellation(t *testing.T) {
+	key := bytes.Repeat([]byte{1}, 32)
+	iid, _ := e2ee.ItemID(key, "20261113-160000.opus")
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	skipDir := filepath.Join(filepath.Dir(store.dbPath), "asr_no_retry")
+	if err := os.Mkdir(skipDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skipDir, iid), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listed := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/inbox":
+			_ = json.NewEncoder(w).Encode(protocol.InboxListResp{Ver: 1, Items: []protocol.InboxItem{{ID: iid}}})
+			listed <- struct{}{}
+		case "/v2/inbox/" + iid:
+			t.Error("skipped audio was fetched again")
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	cfg := Config{ServerURL: srv.URL}
+	eng := NewEngine(cfg, store, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		ver, failed, err := eng.pollAndProcessBatch(ctx, cfg, key, srv.Client(), 1, 20)
+		if err == nil && (ver != 1 || failed) {
+			t.Errorf("skipped item counted as failed: ver=%d failed=%v", ver, failed)
+		}
+		done <- err
+	}()
+	select {
+	case <-listed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("inbox was not listed")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("batch returned immediately with only skipped items: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backoff ignored cancellation")
 	}
 }
 

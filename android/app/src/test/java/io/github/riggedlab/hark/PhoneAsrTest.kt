@@ -4,10 +4,7 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
-import java.io.InputStream
-import java.net.InetAddress
 import java.net.SocketTimeoutException
-import java.net.ServerSocket
 import java.nio.file.Files
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicInteger
@@ -18,77 +15,6 @@ class PhoneAsrTest {
     private val sampleOpus: ByteArray by lazy {
         val f = File("../../internal/asr/probe.opus")
         if (f.exists()) f.readBytes() else ByteArray(64) { it.toByte() }
-    }
-
-    private data class HttpReq(val requestLine: String, val headers: Map<String, String>, val body: ByteArray)
-    private data class HttpResp(val status: Int = 200, val headers: Map<String, String> = emptyMap(), val body: String = "{}")
-
-    private fun withTestServer(handler: (HttpReq) -> HttpResp, block: (String) -> Unit) {
-        val ss = ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"))
-        val t = Thread {
-            while (!ss.isClosed) {
-                val sock = runCatching { ss.accept() }.getOrNull() ?: break
-                try {
-                    val ins = sock.getInputStream()
-                    val reqLine = readAsciiLine(ins) ?: continue
-                    val hdrs = LinkedHashMap<String, String>()
-                    while (true) {
-                        val line = readAsciiLine(ins) ?: break
-                        if (line.isEmpty()) break
-                        val idx = line.indexOf(':')
-                        if (idx > 0) hdrs[line.substring(0, idx).trim().lowercase()] = line.substring(idx + 1).trim()
-                    }
-                    val len = hdrs["content-length"]?.toIntOrNull() ?: 0
-                    val body = ByteArray(len)
-                    var read = 0
-                    while (read < len) {
-                        val n = ins.read(body, read, len - read)
-                        if (n <= 0) break
-                        read += n
-                    }
-                    val resp = try {
-                        handler(HttpReq(reqLine, hdrs, body))
-                    } catch (err: Throwable) {
-                        HttpResp(status = 500, body = JSONObject().put("test_assertion_error", err.toString()).toString())
-                    }
-                    val outBytes = resp.body.toByteArray(Charsets.UTF_8)
-                    val head = buildString {
-                        append("HTTP/1.1 ${resp.status} OK\r\n")
-                        append("Content-Type: application/json; charset=utf-8\r\n")
-                        append("Content-Length: ${outBytes.size}\r\n")
-                        append("Connection: close\r\n")
-                        for ((k, v) in resp.headers) append("$k: $v\r\n")
-                        append("\r\n")
-                    }.toByteArray(Charsets.UTF_8)
-                    sock.getOutputStream().use {
-                        it.write(head)
-                        it.write(outBytes)
-                        it.flush()
-                    }
-                } finally {
-                    runCatching { sock.close() }
-                }
-            }
-        }.apply { isDaemon = true; start() }
-        try {
-            block("http://127.0.0.1:${ss.localPort}")
-        } finally {
-            runCatching { ss.close() }
-            t.join(1_000)
-        }
-    }
-
-    private fun readAsciiLine(ins: InputStream): String? {
-        val sb = StringBuilder()
-        while (true) {
-            val b = ins.read()
-            if (b == -1) return if (sb.isEmpty()) null else sb.toString()
-            if (b == '\n'.code) {
-                if (sb.isNotEmpty() && sb[sb.length - 1] == '\r') sb.setLength(sb.length - 1)
-                return sb.toString()
-            }
-            sb.append(b.toChar())
-        }
     }
 
     @Test
@@ -248,6 +174,22 @@ class PhoneAsrTest {
     }
 
     @Test
+    fun dashScopeUsesWholeTextWhenWordTimesCoverOnlyTheLastSentence() {
+        val full = "先说前一句。最后一句。"
+        val body = """{"output":{"text":"$full","sentence":{"text":"最后一句。","words":[{"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}"""
+        withTestServer({ HttpResp(body = body) }) { url ->
+            val result = PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, url, "k"), "test.opus", sampleOpus)
+            val segments = result.getJSONArray("segments")
+            assertTrue(result.getBoolean("synthetic_segments"))
+            assertEquals(full, result.getString("text"))
+            assertEquals(1, segments.length())
+            assertEquals(full, segments.getJSONObject(0).getString("text"))
+            assertEquals(0.0, segments.getJSONObject(0).getDouble("start"), 0.0)
+            assertEquals(3.0, segments.getJSONObject(0).getDouble("end"), 0.0)
+        }
+    }
+
+    @Test
     fun dashScopeSilenceEmptyAndSingleSentence() {
         val responses = listOf(
             HttpResp(status = 400, body = """{"code":"Audio.AudioSilentError","message":"silent audio"}"""),
@@ -304,7 +246,7 @@ class PhoneAsrTest {
 
     @Test
     fun dashScopeRebuildsWordsAtPunctuationAndGapsWithoutSpeakers() {
-        val output = JSONObject("""{"text":"全文与单个sentence不同也保留时间戳","sentence":{"speaker_id":7,"words":[
+        val output = JSONObject("""{"text":"你好！Yes! 先，连。停；","sentence":{"speaker_id":7,"words":[
             {"text":"你","begin_time":100,"end_time":200},
             {"text":"好","punctuation":"。","begin_time":250,"end_time":500},
             {"text":"Yes!","punctuation":"!","begin_time":700,"end_time":900},

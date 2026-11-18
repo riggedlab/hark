@@ -118,6 +118,38 @@ class ProximityTest {
     }
 
     @Test
+    fun farSpeechIsKeptBeforeWearerEnrollmentAndLegacyFarMarksAreRetried() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val far = Proximity.SegmentAcoustic(-39f, 1.3f, -47f, 8f, -3f)
+        assertEquals(Proximity.FAR, Proximity.classifySegment(far, nearMargin = -0.18f))
+        // A named wearer in the old roster is not a new voiceprint enrollment.
+        Speakers.selfIdentity(ctx)
+        val pcm = FloatArray(16_000) { (0.006 * sin(2 * PI * 220 * it / 16_000)).toFloat() }
+        val speech = IntArray(27) { it * 512 }
+        assertFalse(Voiceprint.hasSelfEnrollment(ctx))
+        assertEquals(Proximity.ChunkGate.KEEP, Proximity.screenChunkPcm(ctx, pcm, speech))
+        assertEquals(Proximity.ChunkGate.NO_VOICE, Proximity.screenChunkPcm(ctx, pcm, intArrayOf()))
+
+        val date = java.time.LocalDate.of(2026, 11, 18)
+        val name = "20261110-120000.opus"
+        val chunks = RecorderService.chunkDir(ctx).apply { mkdirs() }
+        val audio = File(chunks, name).apply { writeBytes(ByteArray(64)) }
+        File(ctx.filesDir, "farvoice/$name").apply { parentFile?.mkdirs(); createNewFile() }
+        File(ctx.filesDir, "vad_gate/$name.txt").apply { parentFile?.mkdirs(); writeText("far") }
+        assertFalse(Uploader(ctx).isFarSkipped(audio))
+        assertTrue(Uploader(ctx).hasPendingWork())
+        // The dummy file decodes to silence. The stale far cache must not override that result.
+        assertEquals(Proximity.ChunkGate.NO_VOICE, Vad.screenChunk(ctx, audio))
+        Recordings.cleanup(chunks, today = date)
+        assertTrue(audio.exists())
+
+        File(ctx.filesDir, "${Uploader.FAR_MARK_DIR}/$name").createNewFile()
+        assertTrue(Uploader(ctx).isFarSkipped(audio))
+        Recordings.cleanup(chunks, today = date)
+        assertFalse(audio.exists())
+    }
+
+    @Test
     fun shortReplyInheritsAdjacentSameSpeakerProximity() {
         val starts = doubleArrayOf(1.0, 4.2)
         val ends = doubleArrayOf(3.5, 4.65) // 第二句仅 0.45s ("好的")

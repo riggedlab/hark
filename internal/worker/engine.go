@@ -554,24 +554,34 @@ func (e *Engine) pollAndProcessBatch(ctx context.Context, cfg Config, key []byte
 	}
 
 	failed := false
+	skipped := 0
 	for _, it := range list.Items {
 		if ctx.Err() != nil || e.isPaused() {
 			return list.Ver, failed, ctx.Err()
 		}
-		if err := e.processOne(ctx, cfg, key, client, it.ID); err != nil {
+		err := e.processOne(ctx, cfg, key, client, it.ID)
+		if errors.Is(err, errASRSkipped) {
+			skipped++
+		} else if err != nil {
 			failed = true
 			e.setError(err.Error())
 			log.Printf("[hark-worker] %s 处理失败: %v", it.ID, err)
 		}
 	}
+	if skipped == len(list.Items) {
+		// The mailbox returns immediately while old skipped audio is still present.
+		sleepCtx(pollCtx, 5*time.Second)
+	}
 	return list.Ver, failed, nil
 }
+
+var errASRSkipped = errors.New("ASR item already skipped")
 
 func (e *Engine) processOne(ctx context.Context, cfg Config, key []byte, client *http.Client, iid string) error {
 	// 持久跳过坏音频/可能已计费的超时，后续轮询和进程重启都不能重发同一项。
 	skipFile := filepath.Join(filepath.Dir(e.store.dbPath), "asr_no_retry", iid)
 	if _, err := os.Stat(skipFile); err == nil {
-		return nil
+		return errASRSkipped
 	}
 	base := strings.TrimRight(cfg.ServerURL, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v2/inbox/"+url.PathEscape(iid), nil)
@@ -680,14 +690,15 @@ func (e *Engine) processOne(ctx context.Context, cfg Config, key []byte, client 
 	}
 
 	payload := protocol.TranscriptPayload{
-		Name:      name,
-		StartedAt: startedAt,
-		DurationS: res.DurationS,
-		SpeechS:   res.SpeechS,
-		Engine:    res.Engine,
-		Model:     res.Model,
-		Text:      res.Text,
-		Segments:  outSegs,
+		Name:              name,
+		StartedAt:         startedAt,
+		DurationS:         res.DurationS,
+		SpeechS:           res.SpeechS,
+		Engine:            res.Engine,
+		Model:             res.Model,
+		Text:              res.Text,
+		Segments:          outSegs,
+		SyntheticSegments: res.SyntheticSegments,
 	}
 	if err := e.store.SaveTranscript(payload); err != nil {
 		return err

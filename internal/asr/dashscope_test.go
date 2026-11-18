@@ -155,6 +155,7 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 		{"null", `{"output":{"text":"","sentence":null}}`, "", 200, false},
 		{"text only", `{"output":{"text":"全文"}}`, "全文", 200, true},
 		{"sentence only", `{"output":{"sentence":{"text":"单句","begin_time":100,"end_time":2100,"speaker_id":null}}}`, "单句", 200, true},
+		{"final words only", `{"output":{"text":"前一句。最后一句。","sentence":{"text":"最后一句。","words":[{"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}`, "前一句。最后一句。", 200, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -173,6 +174,9 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 			}
 			if tc.text == "" && (len(res.Segments) != 0 || res.SpeechS != 0) {
 				t.Fatalf("silence has speech: %+v", res)
+			}
+			if tc.synthetic && (len(res.Segments) != 1 || res.Segments[0].Text != tc.text || res.Segments[0].Start != 0 || res.Segments[0].End != res.DurationS) {
+				t.Fatalf("synthetic segment must cover the entire transcript: %+v", res)
 			}
 		})
 	}
@@ -220,7 +224,7 @@ func TestDashScopeWordsRebuildSentences(t *testing.T) {
 	}
 	for _, array := range []bool{false, true} {
 		var data dashScopeResponse
-		data.Output.Text = "全文不同也保留逐句时间戳"
+		data.Output.Text = "你好！Yes! 先，连。停；"
 		if array {
 			data.Output.Sentences = []dashScopeSentence{{Words: words}}
 		} else {

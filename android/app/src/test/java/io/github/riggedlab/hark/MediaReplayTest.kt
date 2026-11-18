@@ -61,8 +61,8 @@ class MediaReplayTest {
             if (runaway.isNotBlank()) {
                 val transcript = read(runaway)
                 val before = transcript.getJSONArray("segments").length()
-                val discarded = Transcripts.rejectRunawayAsr(transcript)
-                val after = transcript.getJSONArray("segments").length()
+                val discarded = Transcripts.sanitizeAsr(transcript) != null
+                val after = if (discarded) 0 else transcript.getJSONArray("segments").length()
                 appendLine("ASR $runaway: $before -> $after sentences (discarded=$discarded)")
             }
         }

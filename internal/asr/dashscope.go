@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ErrBadAudio marks an unusable recording; retrying the same audio cannot fix it.
@@ -214,12 +215,18 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64, ena
 	}
 	fullText := strings.TrimSpace(data.Output.Text)
 	if fullText == "" {
-		fullText = strings.Join(textParts, "")
+		var sentenceText strings.Builder
+		for _, sentence := range sentences {
+			sentenceText.WriteString(sentence.Text)
+		}
+		fullText = strings.TrimSpace(sentenceText.String())
 	}
-	if fullText == "" && data.Output.Sentence != nil {
-		fullText = strings.TrimSpace(data.Output.Sentence.Text)
+	timedText := strings.Join(textParts, "")
+	if fullText == "" {
+		fullText = timedText
 	}
-	synthetic := fullText != "" && len(segs) == 0
+	// output.sentence.words can cover just the final sentence of output.text.
+	synthetic := fullText != "" && (len(segs) == 0 || dashScopeTextKey(fullText) != dashScopeTextKey(timedText))
 	if synthetic {
 		segs = []Segment{{Start: 0, End: math.Round(dur*100) / 100, Text: fullText}}
 		speechS = dur
@@ -228,6 +235,15 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64, ena
 		Text: fullText, DurationS: math.Round(dur*100) / 100, SpeechS: math.Round(speechS*100) / 100,
 		Engine: ProviderDashScope, Model: model, Segments: segs, SyntheticSegments: synthetic,
 	}
+}
+
+func dashScopeTextKey(text string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return r
+		}
+		return -1
+	}, text)
 }
 
 func dashScopeWordSegments(words []dashScopeWord) []Segment {

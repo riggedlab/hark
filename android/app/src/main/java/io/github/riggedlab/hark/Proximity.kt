@@ -365,12 +365,13 @@ internal object Proximity {
     /**
      * 上传/直连转写前的整段远近粗筛（复用 Vad 已解码的 pcm16k 与 Silero 人声窗口索引，零二次解码）：
      * - 只要存在任意一段近场人声，或命中本机已保护用户名册声纹（如把设备放桌面上说话的本人），立即放行 KEEP；
-     * - 仅当整段 100% 为远场背景杂谈或电子外放，且声纹不匹配已知核心人物时，才返回 FAR_OR_MEDIA。
+     * - 本人完成注册之前，有人声就保留。远场分数无法区分背景人声和在桌边说话的本人。
      */
     fun screenChunkPcm(ctx: Context, pcm16k: FloatArray, speechWinStarts: IntArray): ChunkGate {
         val speechSec = speechWinStarts.size * 512.0 / SAMPLE_RATE
         if (speechSec < Vad.MIN_SPEECH_S) return ChunkGate.NO_VOICE
         if (pcm16k.isEmpty()) return ChunkGate.KEEP
+        if (!Voiceprint.hasSelfEnrollment(ctx)) return ChunkGate.KEEP
 
         // 将相邻 <=0.45s 的 32ms Silero 人声窗口合并为连续发声段
         val bursts = ArrayList<Pair<Double, Double>>()
@@ -428,7 +429,7 @@ internal object Proximity {
             val spans = bursts.map { (st, ed) -> Voiceprint.Span(st, ed, "") }
             val matchedKnown = runCatching {
                 Voiceprint.matchesProtectedSpeaker(ctx, pcm16k, spans, minSim = 0.58f)
-            }.getOrDefault(false)
+            }.getOrDefault(true)
             if (matchedKnown) return ChunkGate.KEEP
         }
 

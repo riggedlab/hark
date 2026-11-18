@@ -1,6 +1,7 @@
 package io.github.riggedlab.hark
 
 import android.content.Context
+import android.content.SharedPreferences
 import java.net.URI
 
 enum class WorkMode(val id: String, val label: String) {
@@ -138,24 +139,38 @@ data class AsrConfig(
     }
 
     companion object {
+        @Synchronized
         fun rawValues(ctx: Context): AsrConfig {
             val p = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
             val provider = AsrProvider.fromId(p.getString("asr_provider", null))
             return AsrConfig(
                 provider = provider,
                 baseUrl = p.getString("asr_base_url", null) ?: provider.defaultUrl,
-                apiKey = p.getString("asr_api_key", null) ?: "",
+                apiKey = savedKey(p, provider),
                 appId = p.getString("asr_app_id", null) ?: "",
                 model = p.getString("asr_model", null) ?: provider.defaultModel,
             )
         }
 
         /** 每家服务商各存一份密钥：切换服务商时换成对应的密钥，避免把豆包的 Key 发给百炼导致 401。 */
-        fun savedKey(ctx: Context, provider: AsrProvider): String {
+        @Synchronized
+        fun savedKey(ctx: Context, provider: AsrProvider): String =
+            savedKey(ctx.getSharedPreferences("config", Context.MODE_PRIVATE), provider)
+
+        private fun savedKey(p: SharedPreferences, provider: AsrProvider): String =
+            p.getString("asr_api_key_${provider.id}", null)
+                ?: p.getString("asr_api_key", null)?.takeIf { provider == selectedProvider(p) }.orEmpty()
+
+        private fun selectedProvider(p: SharedPreferences): AsrProvider =
+            AsrProvider.fromId(p.getString("asr_provider", null))
+
+        internal fun selectedProvider(ctx: Context): AsrProvider =
+            selectedProvider(ctx.getSharedPreferences("config", Context.MODE_PRIVATE))
+
+        @Synchronized
+        internal fun legacyTimeoutProvider(ctx: Context): AsrProvider {
             val p = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
-            p.getString("asr_api_key_${provider.id}", null)?.let { return it }
-            // 升级前只存了一份：只有当时保存的服务商就是它时才沿用
-            return if (p.getString("asr_provider", null) == provider.id) p.getString("asr_api_key", null) ?: "" else ""
+            return p.getString("asr_legacy_timeout_provider", null)?.let(AsrProvider::fromId) ?: selectedProvider(p)
         }
 
         fun statusHint(ctx: Context): String? = rawValues(ctx).validationError()
@@ -165,11 +180,24 @@ data class AsrConfig(
             return if (cfg.validationError() == null) cfg else null
         }
 
+        @Synchronized
         fun save(ctx: Context, cfg: AsrConfig) {
-            ctx.getSharedPreferences("config", Context.MODE_PRIVATE).edit()
+            val p = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
+            val oldProvider = selectedProvider(p)
+            val editor = p.edit()
+            val legacyKey = p.getString("asr_api_key", null)
+            if (legacyKey != null) {
+                val oldKey = "asr_api_key_${oldProvider.id}"
+                if (!p.contains(oldKey)) editor.putString(oldKey, legacyKey)
+                editor.remove("asr_api_key")
+            }
+            if (!p.contains("asr_legacy_timeout_provider")) {
+                // 旧超时标记只有错误类型，以首次保存前的服务商作为归属。
+                editor.putString("asr_legacy_timeout_provider", oldProvider.id)
+            }
+            editor
                 .putString("asr_provider", cfg.provider.id)
                 .putString("asr_base_url", cfg.baseUrl.trim())
-                .putString("asr_api_key", cfg.apiKey.trim())
                 .putString("asr_api_key_${cfg.provider.id}", cfg.apiKey.trim())
                 .putString("asr_app_id", cfg.appId.trim())
                 .putString("asr_model", cfg.model.trim())

@@ -13,7 +13,7 @@ import java.util.UUID
 import kotlin.math.max
 import kotlin.math.round
 
-enum class AsrFailureKind { AUTH_OR_CONFIG, BAD_AUDIO, READ_TIMEOUT, TRANSIENT }
+enum class AsrFailureKind { AUTH_OR_CONFIG, BAD_AUDIO, READ_TIMEOUT, RUNAWAY_OUTPUT, TRANSIENT }
 
 class PhoneAsrException(val kind: AsrFailureKind, message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
@@ -366,10 +366,21 @@ object PhoneAsr {
             val output = data.optJSONObject("output") ?: JSONObject()
             val durS = data.optJSONObject("usage")?.optDouble("duration", 0.0)?.takeIf { it > 0 } ?: localDur
             val segs = dashScopeSegments(output, enableSpeaker)
-            val fullText = output.optString("text").trim().ifEmpty { output.optJSONObject("sentence")?.optString("text").orEmpty() }
-            return buildTranscriptJson(name, durS, fullText, cfg.provider.id, cfg.model, segs)
+            val sentences = output.optJSONArray("sentences") ?: JSONArray()
+            val fullText = output.optString("text").trim().ifEmpty {
+                (0 until sentences.length()).joinToString("") { sentences.getJSONObject(it).optString("text") }
+                    .ifBlank { output.optJSONObject("sentence")?.optString("text").orEmpty() }
+            }
+            // sentence.words 可能只有末句。时间戳覆盖不全时，以整段原文回退到合成段。
+            val timedText = segs.joinToString("") { it.text }
+            val complete = fullText.isBlank() || dashScopeTextKey(fullText) == dashScopeTextKey(timedText)
+            return buildTranscriptJson(name, durS, fullText, cfg.provider.id, cfg.model, if (complete) segs else emptyList())
         }
     }
+
+    private val dashScopeNonSpeech = Regex("[^\\p{L}\\p{N}]+")
+
+    private fun dashScopeTextKey(text: String): String = text.replace(dashScopeNonSpeech, "")
 
     internal fun dashScopeSegments(output: JSONObject, enableSpeaker: Boolean): List<RawSeg> {
         val sentences = output.optJSONArray("sentences")

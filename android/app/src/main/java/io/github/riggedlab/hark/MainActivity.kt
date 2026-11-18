@@ -377,6 +377,7 @@ internal enum class BaseChunkStatus {
     FAR_SKIPPED,
     BAD_AUDIO,
     ASR_TIMEOUT,
+    ASR_REJECTED,
     UPLOADED,
     PENDING,
 }
@@ -580,7 +581,7 @@ class MainActivity : ComponentActivity() {
         val placeMod = java.io.File(filesDir, "places/places.json").lastModified()
         val fixMod = java.io.File(filesDir, "places/fixes.jsonl").lastModified()
         val sceneSig = SceneAndMood.sceneSignature(this)
-        return "$opusCount:$newestName:$textCount:$sceneSig:${marks.uploaded.size}:${marks.silent.size}:${marks.farSkipped.size}:${marks.badAudio}:${marks.asrTimedOut}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
+        return "$opusCount:$newestName:$textCount:$sceneSig:${marks.uploaded.size}:${marks.silent.size}:${marks.farSkipped.size}:${marks.badAudio}:${marks.asrTimedOut}:${marks.asrRejected}:$spkMacMod:$spkLocalMod:$spkPhoneMod:$placeMod:$fixMod:$textVer:$cfgVer:$manualVer"
     }
 
     private fun resolveInRoster(id: String?, roster: Map<String, Speaker>): Speaker? {
@@ -1064,6 +1065,7 @@ class MainActivity : ComponentActivity() {
                 r.name in marks.farSkipped -> BaseChunkStatus.FAR_SKIPPED
                 r.name in marks.badAudio -> BaseChunkStatus.BAD_AUDIO
                 r.name in marks.asrTimedOut -> BaseChunkStatus.ASR_TIMEOUT
+                r.name in marks.asrRejected -> BaseChunkStatus.ASR_REJECTED
                 r.name in marks.uploaded -> BaseChunkStatus.UPLOADED
                 else -> BaseChunkStatus.PENDING
             }
@@ -4116,6 +4118,7 @@ private fun resolveRecordingStatus(
     BaseChunkStatus.FAR_SKIPPED -> "远场/外放，已静默"
     BaseChunkStatus.BAD_AUDIO -> "音频异常，已跳过"
     BaseChunkStatus.ASR_TIMEOUT -> "转写响应超时，已停止自动重试"
+    BaseChunkStatus.ASR_REJECTED -> "转写输出异常，已跳过"
     BaseChunkStatus.UPLOADED -> when {
         mode == WorkMode.DIRECT_ASR -> when {
             sync.localAsrRunning == item.rec.name -> "正在整理…"

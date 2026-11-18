@@ -127,7 +127,7 @@ internal object Voiceprint {
             try {
                 val updated = Transcripts.computeAndCommit(ctx, name) { root ->
                     if (!force && root.optInt("vp_ver", 0) >= SCHEMA_VERSION) false
-                    else doEnrich(ctx, File(RecorderService.chunkDir(ctx), name), root)
+                    else doEnrich(ctx, File(RecorderService.chunkDir(ctx), name), root, preserveHistory = true)
                 }
                 if (updated) {
                     changed = true
@@ -422,7 +422,7 @@ internal object Voiceprint {
         }.toMap()
     }
 
-    internal fun addEnrollment(ctx: Context, id: String, name: String, start: Double, end: Double, embedding: FloatArray, source: String) = synchronized(Speakers) {
+    internal fun addEnrollment(ctx: Context, id: String, name: String, start: Double, end: Double, embedding: FloatArray, source: String): Boolean = synchronized(Speakers) {
         val file = enrollFile(ctx)
         val root = readObject(file)
         val samples = root.optJSONArray(id) ?: JSONArray().also { root.put(id, it) }
@@ -432,14 +432,17 @@ internal object Voiceprint {
             val old = samples.getJSONObject(i)
             if (old.optString("file") == name && old.optDouble("start") == start && old.optDouble("end") == end) {
                 // 重启重导入不增重，人工样本的来源不被 seed 覆盖。
-                if (old.optString("source") == "user" && source == "seed") return
+                val oldSource = old.optString("source")
+                if (oldSource == "user" && source == "seed") return false
+                if (oldSource == source && old.getJSONArray("emb").toString() == sample.getJSONArray("emb").toString()) return false
                 samples.put(i, sample)
                 Sync.writeFile(file, root.toString())
-                return
+                return true
             }
         }
         samples.put(sample)
         Sync.writeFile(file, root.toString())
+        true
     }
 
     /** 人工改判时撤回同一句以前的注册样本，避免旧判断继续影响质心。 */
@@ -485,7 +488,10 @@ internal object Voiceprint {
             Sync.writeFile(file, root.toString())
         }
         // 先让人工指定立刻生效，即使原录音已过期，随后再后台重打分。
-        Transcripts.computeAndCommit(ctx, name) { root -> applyAssignments(ctx, name, root, readCache(ctx, name).orEmpty()); true }
+        Transcripts.computeAndCommit(ctx, name) { root ->
+            applyAssignments(ctx, name, root, readCache(ctx, name).orEmpty(), preserveHistory = true)
+            true
+        }
         refreshUi()
         SceneAndMood.scheduleBackgroundScan(ctx)
         bgScope.launch {
@@ -522,8 +528,7 @@ internal object Voiceprint {
                         val entries = readCache(ctx, name).orEmpty().filterNot { it.start == start && it.end == end }
                         writeCache(ctx, name, entries + CachedSegment(start, end, emb))
                     }
-                    addEnrollment(ctx, id, name, start, end, emb, "seed")
-                    changed = true
+                    changed = addEnrollment(ctx, id, name, start, end, emb, "seed") || changed
                 } catch (e: Exception) {
                     complete = false
                     Log.w(TAG, "$name 种子导入失败: ${e.message}")
@@ -534,7 +539,7 @@ internal object Voiceprint {
         return changed
     }
 
-    private fun applyAssignments(ctx: Context, name: String, root: JSONObject, cache: List<CachedSegment>) {
+    private fun applyAssignments(ctx: Context, name: String, root: JSONObject, cache: List<CachedSegment>, preserveHistory: Boolean) {
         val segments = root.optJSONArray("segments") ?: return
         val manual = manualAssignments(ctx, name, segments)
         val utterances = (0 until segments.length()).mapNotNull { i ->
@@ -552,12 +557,20 @@ internal object Voiceprint {
         for (i in 0 until segments.length()) {
             val s = segments.getJSONObject(i)
             val previousSpeaker = s.optString("speaker")
-            val speaker = assigned[i] ?: "other_${++other}"
+            val previousProtected = Proximity.isProtectedSpeakerId(previousSpeaker, roster)
+            val previousEdited = previousProtected || roster[previousSpeaker]?.mergedInto != null
+            val override = manual[i]
+            val keepHistory = preserveHistory && previousEdited &&
+                (override == null || (override == NOT_SELF && previousSpeaker !in selfIds))
+            val speaker = when {
+                keepHistory -> previousSpeaker
+                else -> assigned[i] ?: "other_${++other}"
+            }
             val isProtected = Proximity.isProtectedSpeakerId(speaker, roster)
             s.put("speaker", speaker)
             if (manual.containsKey(i)) s.put("vp_manual", manual.getValue(i)) else s.remove("vp_manual")
             // 身份保护改变了连续段边界，仍有录音时需要重新计算整段。
-            if (previousSpeaker != speaker && isProtected != Proximity.isProtectedSpeakerId(previousSpeaker, roster)) {
+            if (previousSpeaker != speaker && isProtected != previousProtected) {
                 SceneAndMood.invalidateAudioEnrichment(root)
             }
             if (s.optString("proximity") == Proximity.MEDIA && isProtected) {
@@ -573,16 +586,25 @@ internal object Voiceprint {
         return transcriptJson
     }
 
-    private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject): Boolean {
+    private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject, preserveHistory: Boolean = false): Boolean {
         val segments = root.optJSONArray("segments")
         if (segments == null || segments.length() == 0 || root.optBoolean("synthetic_segments", false)) {
             root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
             return true
         }
         val cache = cachedSegments(ctx, opusFile, segments) ?: return false
-        applyAssignments(ctx, opusFile.name, root, cache)
+        applyAssignments(ctx, opusFile.name, root, cache, preserveHistory)
         root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
         return true
+    }
+
+    internal fun hasSelfEnrollment(ctx: Context): Boolean = synchronized(Speakers) {
+        val roster = Speakers.all(ctx)
+        val selfIds = Speakers.selfIds(roster)
+        val enrolled = readObject(enrollFile(ctx))
+        enrolled.keys().asSequence().any { id ->
+            Speakers.resolve(roster, id)?.id in selfIds && (enrolled.optJSONArray(id)?.length() ?: 0) > 0
+        }
     }
 
     /** 录音粗筛仍可用显式注册身份保护佩戴者；绝不从历史 ASR 标签自举。 */

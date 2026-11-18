@@ -94,15 +94,16 @@ type Segment struct {
 
 // TranscriptPayload 加密写入 /v2/outbox/{item_id} 的转写结果。
 type TranscriptPayload struct {
-	Name      string     `json:"name"`
-	StartedAt string     `json:"started_at"`
-	DurationS float64    `json:"duration_s"`
-	SpeechS   float64    `json:"speech_s"`
-	Engine    string     `json:"engine"`
-	Model     string     `json:"model"`
-	Text      string     `json:"text"`
-	Segments  []Segment  `json:"segments"`
-	SceneTags []SceneTag `json:"scene_tags,omitempty"`
+	Name              string     `json:"name"`
+	StartedAt         string     `json:"started_at"`
+	DurationS         float64    `json:"duration_s"`
+	SpeechS           float64    `json:"speech_s"`
+	Engine            string     `json:"engine"`
+	Model             string     `json:"model"`
+	Text              string     `json:"text"`
+	Segments          []Segment  `json:"segments"`
+	SyntheticSegments bool       `json:"synthetic_segments,omitempty"`
+	SceneTags         []SceneTag `json:"scene_tags,omitempty"`
 }
 
 // MacSpeakerItem Worker 加密写入 slot:speakers_mac 的单个人物初始样本。

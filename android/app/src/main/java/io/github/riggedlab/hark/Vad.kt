@@ -26,6 +26,7 @@ object Vad {
     private const val PROB = 0.5f
     private const val WIN = 512          // 16kHz 下 32ms
     private const val CTX = 64           // Silero v5 每个窗口前要带上一窗口末尾 64 个采样
+    private const val FAR_GATE_TAG = "far_v2"
 
     @Volatile private var session: OrtSession? = null
     private val env by lazy { OrtEnvironment.getEnvironment() }
@@ -63,7 +64,10 @@ object Vad {
         gateCacheFile(ctx, rec).takeIf { it.exists() }?.readText()?.trim()?.let { tag ->
             when (tag) {
                 "novoice" -> return Proximity.ChunkGate.NO_VOICE
-                "far" -> return Proximity.ChunkGate.FAR_OR_MEDIA
+                FAR_GATE_TAG -> {
+                    val enrolled = runCatching { Voiceprint.hasSelfEnrollment(ctx) }.getOrDefault(false)
+                    return if (enrolled) Proximity.ChunkGate.FAR_OR_MEDIA else Proximity.ChunkGate.KEEP
+                }
                 "keep" -> return Proximity.ChunkGate.KEEP
             }
         }
@@ -94,7 +98,7 @@ object Vad {
     private fun writeGateCache(ctx: Context, rec: File, gate: Proximity.ChunkGate) {
         val code = when (gate) {
             Proximity.ChunkGate.NO_VOICE -> "novoice"
-            Proximity.ChunkGate.FAR_OR_MEDIA -> "far"
+            Proximity.ChunkGate.FAR_OR_MEDIA -> FAR_GATE_TAG
             Proximity.ChunkGate.KEEP -> "keep"
         }
         runCatching {

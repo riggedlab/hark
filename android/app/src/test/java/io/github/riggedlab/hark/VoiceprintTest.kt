@@ -194,9 +194,9 @@ class VoiceprintTest {
             .put("朋友", JSONArray().put(JSONObject().put("file", name).put("start", 2).put("end", 2.4)))
             .put("新朋友", JSONArray().put(JSONObject().put("file", name).put("start", 2).put("end", 2.4)))
         val file = File(ctx.filesDir, "voice_seed.json")
-        repeat(2) {
+        repeat(2) { i ->
             file.writeText(seed.toString())
-            assertTrue(Voiceprint.bootstrapIfNeeded(ctx))
+            assertEquals(i == 0, Voiceprint.bootstrapIfNeeded(ctx))
             assertFalse(file.exists())
         }
         val enroll = JSONObject(File(ctx.filesDir, "voice_enroll.json").readText())
@@ -207,6 +207,53 @@ class VoiceprintTest {
         // 按样本均值而非句长加权计算身份质心。
         Voiceprint.addEnrollment(ctx, me, name, 3.0, 30.0, vector(80.0), "user")
         assertArrayEquals(vector(40.0), Voiceprint.enrollmentCentroids(ctx).getValue(me), 1e-6f)
+    }
+
+    @Test fun partialSeedImportDoesNotRewriteHistoryAgain() {
+        val name = "20261113-122000.opus"
+        val expired = "20261110-122000.opus"
+        Voiceprint.writeCache(ctx, name, listOf(
+            Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)),
+            Voiceprint.CachedSegment(2.0, 2.4, null),
+        ))
+        Transcripts.save(ctx, transcript(name).put("vp_ver", Voiceprint.SCHEMA_VERSION))
+        val seed = File(ctx.filesDir, "voice_seed.json").apply {
+            writeText(JSONObject().put("self", JSONArray(listOf(name, expired).map {
+                JSONObject().put("file", it).put("start", 0).put("end", 2)
+            })).toString())
+        }
+
+        assertTrue(Voiceprint.bootstrapIfNeeded(ctx))
+        assertTrue(seed.exists())
+        val history = File(Transcripts.dir(ctx), "$name.json")
+        assertTrue(history.setLastModified(1_000L))
+        assertFalse(Voiceprint.bootstrapIfNeeded(ctx))
+        assertEquals(1_000L, history.lastModified())
+        assertEquals(Speakers.selfIdentity(ctx), Transcripts.get(ctx, name)?.segments?.first()?.speaker)
+    }
+
+    @Test fun rescoreKeepsNamedHistoryAndBothSidesOfAnUnnamedMerge() {
+        val name = "20261113-122100.opus"
+        val roster = JSONObject().put("items", JSONObject().put("named", JSONObject())
+            .put("source", JSONObject()).put("target", JSONObject()).put("untouched", JSONObject()))
+        File(ctx.filesDir, "speakers_mac.json").writeText(roster.toString())
+        assertTrue(Speakers.edit(ctx, "named", name = "李总"))
+        assertTrue(Speakers.edit(ctx, "source", mergeInto = "target"))
+        File(RecorderService.chunkDir(ctx).apply { mkdirs() }, name).writeBytes(ByteArray(64))
+        val ids = listOf("named", "source", "target", "untouched")
+        val segments = JSONArray(ids.mapIndexed { i, id -> JSONObject().put("text", "第${i + 1}句")
+            .put("speaker", id).put("start", i).put("end", i + 1) })
+        Transcripts.save(ctx, JSONObject().put("name", name).put("vp_ver", 2).put("segments", segments))
+        Voiceprint.writeCache(ctx, name, ids.indices.map { i ->
+            Voiceprint.CachedSegment(i.toDouble(), i + 1.0, vector(0.0))
+        })
+
+        assertTrue(Voiceprint.bootstrapIfNeeded(ctx))
+
+        val speakers = requireNotNull(Transcripts.get(ctx, name)).segments.map { it.speaker }
+        assertEquals(ids.take(3), speakers.take(3))
+        assertTrue(speakers.last()?.startsWith("other_") == true)
+        assertEquals("target", Speakers.resolve(ctx, speakers[1])?.id)
     }
 
     @Test fun schemaMigrationInvalidatesAllOldPrototypesAndKeepsRosterMetadata() {

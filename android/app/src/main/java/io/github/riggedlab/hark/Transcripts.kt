@@ -48,7 +48,7 @@ object Transcripts {
     private val missing = ConcurrentHashMap.newKeySet<String>()
     private val writeEpochs = ConcurrentHashMap<String, AtomicLong>()
 
-    // Whisper 和项目的 MLX 指南都用复读信号识别解码失控。这里是丢弃阈值，留足正常应答余量。
+    // 保留日常重复应答，超过阈值才折叠。
     private const val REPEAT_LIMIT = 32
     private val nonSpeechChars = Regex("[^\\p{L}\\p{N}]+")
     private val sentenceBreaks = Regex("[。！？.!?；;，,\\r\\n]+")
@@ -89,14 +89,20 @@ object Transcripts {
         return names
     }
 
-    @Synchronized
-    fun save(ctx: Context, value: JSONObject, alreadyRejected: Boolean = false) {
+    fun save(ctx: Context, value: JSONObject) {
         val name = value.getString("name")
         require(Crypto.audioName.matches(name)) { "录音文件名格式错误" }
         val audio = File(RecorderService.chunkDir(ctx), name)
+        val rejection = sanitizeAsr(value, Recordings.oggDurationSec(audio))
+        if (rejection == null) saveSanitized(ctx, value)
+        else Uploader(ctx).markRejectedCloud(name, rejection)
+    }
+
+    @Synchronized
+    internal fun saveSanitized(ctx: Context, value: JSONObject) {
+        val name = value.getString("name")
+        require(Crypto.audioName.matches(name)) { "录音文件名格式错误" }
         val existingFile = File(dir(ctx), "$name.json")
-        val rejected = alreadyRejected || rejectRunawayAsr(value, Recordings.oggDurationSec(audio))
-        if (rejected && existingFile.exists()) return
         if (!value.has("scene_tags") && existingFile.exists()) {
             runCatching { JSONObject(existingFile.readText()).optJSONArray("scene_tags") }
                 .getOrNull()
@@ -114,54 +120,97 @@ object Transcripts {
         }
     }
 
-    /** 拒收失控文字，保留空转写和音频元数据，让同步游标或手机转写队列正常前进。 */
-    internal fun rejectRunawayAsr(value: JSONObject, audioDurationSec: Double = 0.0): Boolean {
+    /** 折叠重复语句。仅在无法保留可信内容时返回拒收原因。 */
+    internal fun sanitizeAsr(value: JSONObject, audioDurationSec: Double = 0.0): String? {
         val text = value.opt("text") as? String ?: ""
-        val segments = value.optJSONArray("segments") ?: JSONArray()
-        val sentences = (0 until segments.length()).asSequence().mapNotNull {
-            segments.optJSONObject(it)?.opt("text") as? String
+        val array = value.optJSONArray("segments") ?: JSONArray()
+        val segments = (0 until array.length()).map { array.getJSONObject(it) }
+        val segmentTexts = segments.map { it.optString("text") }
+        val textFold = foldRepetitions(listOf(text))
+        val segmentFold = foldRepetitions(segmentTexts)
+        // 部分服务把逐句结果无标点拼成全文，两处的复读边界可能只看得出一处。
+        val sameWords = (textFold != null || segmentFold != null) && text.isNotBlank() &&
+            speechKey(text) == speechKey(segmentTexts.joinToString(""))
+        val cleanText = textFold?.texts?.single()
+            ?: if (sameWords && segmentFold != null) segmentFold.texts.joinToString("") else text
+        val cleanSegments = segmentFold?.texts
+            ?: if (sameWords && segments.size == 1) listOf(cleanText) else segmentTexts
+        val duration = audioDurationSec.takeIf { it.isFinite() && it > 0.0 } ?: value.optDouble("duration_s", 0.0)
+        val chars = maxOf(spokenChars(cleanText), cleanSegments.sumOf(::spokenChars))
+        val onlyUntimedRepetitions = segmentFold?.onlyRepeated == true &&
+            (spokenChars(text) == 0L || textFold?.onlyRepeated == true) &&
+            segments.none { it.optDouble("end") > it.optDouble("start") }
+        // 使用整段真实时长检验折叠后的内容，避免一段长复读连带丢掉正常句。
+        val reason = when {
+            onlyUntimedRepetitions -> "转写内容只有无有效时间的复读"
+            duration.isFinite() && duration > 0.0 && chars > maxOf(80.0, duration * 40.0) ->
+                "转写文字密度异常（${chars} 字符 / ${duration} 秒）"
+            else -> null
         }
-        val repeated = hasRunawayRepetition(sentences) || hasRunawayRepetition(sentenceBreaks.splitToSequence(text))
-        val duration = if (audioDurationSec.isFinite() && audioDurationSec > 0.0) {
-            audioDurationSec
-        } else {
-            value.optDouble("duration_s", 0.0)
+        if (reason != null) {
+            Log.w("Transcripts", "discarded ASR ${value.optString("name")}: $reason")
+            return reason
         }
-        val chars = maxOf(spokenChars(text), sentences.sumOf(::spokenChars))
-        // 普通话快语速约 6.4 音节/秒。40 字符/秒给中英混说和格式化数字留余量，
-        // 80 字符的下限吸收极短录音的时间误差。使用整段时长，不信任服务返回的逐句时间。
-        val tooDense = duration.isFinite() && duration > 0.0 && chars > maxOf(80.0, duration * 40.0)
-        if (!repeated && !tooDense) return false
-
-        Log.w(
-            "Transcripts",
-            "discarded ASR ${value.optString("name")}: repeated=$repeated, tooDense=$tooDense, " +
-                "segments=${segments.length()}, chars=$chars, durationSec=$duration",
-        )
-        value.put("text", "").put("segments", JSONArray()).remove("synthetic_segments")
-        return true
+        if (cleanText != text) value.put("text", cleanText)
+        if (cleanSegments != segmentTexts) {
+            val filtered = JSONArray()
+            for ((i, segment) in segments.withIndex()) {
+                val clean = cleanSegments[i]
+                if (clean.isNotBlank()) filtered.put(segment.put("text", clean))
+            }
+            value.put("segments", filtered)
+        }
+        return null
     }
 
     private fun spokenChars(text: String): Long = text.codePoints().filter { Character.isLetterOrDigit(it) }.count()
 
-    private fun hasRunawayRepetition(sentences: Sequence<String>): Boolean {
-        val counts = HashMap<String, Int>()
-        var previous = ""
-        var consecutive = 0
-        var total = 0
-        var mostRepeated = 0
-        for (sentence in sentences) {
-            val key = sentence.replace(nonSpeechChars, "").lowercase()
-            if (key.isEmpty()) continue
-            consecutive = if (key == previous) consecutive + 1 else 1
-            if (consecutive >= REPEAT_LIMIT) return true
-            previous = key
-            total++
-            val count = (counts[key] ?: 0) + 1
-            counts[key] = count
-            mostRepeated = maxOf(mostRepeated, count)
+    private fun speechKey(text: String): String = text.replace(nonSpeechChars, "").lowercase()
+
+    private data class Phrase(val source: Int, val text: String, val key: String)
+    private data class Fold(val texts: List<String>, val onlyRepeated: Boolean)
+
+    private fun foldRepetitions(texts: List<String>): Fold? {
+        val phrases = ArrayList<Phrase>()
+        for ((source, text) in texts.withIndex()) {
+            var start = 0
+            for (boundary in sentenceBreaks.findAll(text)) {
+                val end = boundary.range.last + 1
+                val phrase = text.substring(start, end)
+                phrases.add(Phrase(source, phrase, speechKey(phrase)))
+                start = end
+            }
+            if (start < text.length) {
+                val phrase = text.substring(start)
+                phrases.add(Phrase(source, phrase, speechKey(phrase)))
+            }
         }
-        return mostRepeated >= REPEAT_LIMIT && mostRepeated.toDouble() / total >= 0.8
+        val spoken = phrases.indices.filter { phrases[it].key.isNotEmpty() }
+        val repeatedKeys = HashSet<String>()
+        val drop = BooleanArray(phrases.size)
+        var first = 0
+        while (first < spoken.size) {
+            val key = phrases[spoken[first]].key
+            var end = first + 1
+            while (end < spoken.size && phrases[spoken[end]].key == key) end++
+            if (end - first >= REPEAT_LIMIT) {
+                repeatedKeys.add(key)
+                for (i in first + 1 until end) drop[spoken[i]] = true
+            }
+            first = end
+        }
+        val counts = spoken.groupingBy { phrases[it].key }.eachCount()
+        val dominant = counts.entries.firstOrNull { it.value >= REPEAT_LIMIT && it.value >= spoken.size * 0.8 }
+        if (dominant != null && repeatedKeys.add(dominant.key)) {
+            val occurrences = spoken.filter { phrases[it].key == dominant.key }
+            for (i in occurrences.drop(1)) drop[i] = true
+        }
+        if (repeatedKeys.isEmpty()) return null
+        val kept = List(texts.size) { StringBuilder() }
+        for ((i, phrase) in phrases.withIndex()) {
+            if (!drop[i]) kept[phrase.source].append(phrase.text)
+        }
+        return Fold(kept.map { it.toString() }, spoken.all { phrases[it].key in repeatedKeys })
     }
 
     /**
@@ -184,6 +233,7 @@ object Transcripts {
             synchronized(this) {
                 val ep = epochCounter(name)
                 if (ep.get() == epochBefore) {
+                    if (serialized == rawText) return false
                     ep.incrementAndGet() // odd = 正在替换文件
                     try {
                         Sync.writeFile(file, serialized)
