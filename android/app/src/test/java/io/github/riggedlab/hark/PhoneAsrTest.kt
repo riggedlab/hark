@@ -190,6 +190,27 @@ class PhoneAsrTest {
     }
 
     @Test
+    fun dashScopeRebuildsFullTextFromWordsWhenOnlyLastSentenceTextIsPresent() {
+        val body = """{"output":{"sentence":{"text":"最后一句。","words":[
+            {"text":"前一句","punctuation":"。","begin_time":100,"end_time":800},
+            {"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}
+        ]}},"usage":{"duration":3}}"""
+        withTestServer({ HttpResp(body = body) }) { url ->
+            val result = PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, url, "k"), "test.opus", sampleOpus)
+            assertEquals("前一句。最后一句。", result.getString("text"))
+            assertFalse(result.optBoolean("synthetic_segments"))
+            val segments = result.getJSONArray("segments")
+            assertEquals(2, segments.length())
+            for ((i, expected) in listOf(PhoneAsr.RawSeg(0.1, 0.8, "前一句。"), PhoneAsr.RawSeg(1.0, 2.0, "最后一句。")).withIndex()) {
+                val segment = segments.getJSONObject(i)
+                assertEquals(expected.text, segment.getString("text"))
+                assertEquals(expected.start, segment.getDouble("start"), 0.001)
+                assertEquals(expected.end, segment.getDouble("end"), 0.001)
+            }
+        }
+    }
+
+    @Test
     fun dashScopeSilenceEmptyAndSingleSentence() {
         val responses = listOf(
             HttpResp(status = 400, body = """{"code":"Audio.AudioSilentError","message":"silent audio"}"""),

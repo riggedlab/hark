@@ -155,6 +155,7 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 		{"null", `{"output":{"text":"","sentence":null}}`, "", 200, false},
 		{"text only", `{"output":{"text":"全文"}}`, "全文", 200, true},
 		{"sentence only", `{"output":{"sentence":{"text":"单句","begin_time":100,"end_time":2100,"speaker_id":null}}}`, "单句", 200, true},
+		{"sentence text more complete", `{"output":{"sentence":{"text":"前一句。最后一句。","words":[{"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}`, "前一句。最后一句。", 200, true},
 		{"final words only", `{"output":{"text":"前一句。最后一句。","sentence":{"text":"最后一句。","words":[{"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}`, "前一句。最后一句。", 200, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -179,6 +180,29 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 				t.Fatalf("synthetic segment must cover the entire transcript: %+v", res)
 			}
 		})
+	}
+}
+
+func TestDashScopeUsesCompleteWordsWhenOnlyFinalSentenceTextIsPresent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"output":{"sentence":{"text":"最后一句。","words":[
+			{"text":"前一句","punctuation":"。","begin_time":100,"end_time":800},
+			{"text":"最后一句","punctuation":"。","begin_time":1000,"end_time":2000}
+		]}},"usage":{"duration":3}}`)
+	}))
+	defer srv.Close()
+	res, err := Transcribe(context.Background(), Config{Provider: ProviderDashScope, BaseURL: srv.URL, APIKey: "k"}, probeAudio, "test.opus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Segment{{Start: 0.1, End: 0.8, Text: "前一句。"}, {Start: 1, End: 2, Text: "最后一句。"}}
+	if res.Text != "前一句。最后一句。" || res.SyntheticSegments || len(res.Segments) != len(want) {
+		t.Fatalf("incomplete transcript: %+v", res)
+	}
+	for i, seg := range res.Segments {
+		if seg.Start != want[i].Start || seg.End != want[i].End || seg.Text != want[i].Text {
+			t.Errorf("segment[%d] = %+v, want %+v", i, seg, want[i])
+		}
 	}
 }
 

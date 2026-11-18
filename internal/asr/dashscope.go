@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ErrBadAudio marks an unusable recording; retrying the same audio cannot fix it.
@@ -213,6 +214,8 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64, ena
 		speechS += s.End - s.Start
 		textParts = append(textParts, s.Text)
 	}
+	timedText := strings.Join(textParts, "")
+	timedKey := dashScopeTextKey(timedText)
 	fullText := strings.TrimSpace(data.Output.Text)
 	if fullText == "" {
 		var sentenceText strings.Builder
@@ -220,13 +223,16 @@ func dashScopeResult(data dashScopeResponse, model string, localDur float64, ena
 			sentenceText.WriteString(sentence.Text)
 		}
 		fullText = strings.TrimSpace(sentenceText.String())
-	}
-	timedText := strings.Join(textParts, "")
-	if fullText == "" {
-		fullText = timedText
+		if fullText == "" && data.Output.Sentence != nil {
+			fullText = strings.TrimSpace(data.Output.Sentence.Text)
+		}
+		// Without cumulative text, sentence.text may be just the final sentence even when words cover the whole clip.
+		if fullText == "" || utf8.RuneCountInString(timedKey) > utf8.RuneCountInString(dashScopeTextKey(fullText)) {
+			fullText = timedText
+		}
 	}
 	// output.sentence.words can cover just the final sentence of output.text.
-	synthetic := fullText != "" && (len(segs) == 0 || dashScopeTextKey(fullText) != dashScopeTextKey(timedText))
+	synthetic := fullText != "" && (len(segs) == 0 || dashScopeTextKey(fullText) != timedKey)
 	if synthetic {
 		segs = []Segment{{Start: 0, End: math.Round(dur*100) / 100, Text: fullText}}
 		speechS = dur

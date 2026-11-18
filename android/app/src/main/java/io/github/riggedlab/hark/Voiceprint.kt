@@ -554,20 +554,21 @@ internal object Voiceprint {
         val selfIds = roster.keys.filter { Speakers.resolve(roster, it)?.id in selfRoots }.toSet()
         val assigned = assignSpeakers(utterances, enrollmentCentroids(ctx), manual, selfIds)
         var other = assigned.values.mapNotNull { it.removePrefix("other_").toIntOrNull() }.maxOrNull() ?: 0
+        // 人工改判也会先写一次归属，完整重算前可能仍是旧 vp_ver，每段历史只识别一次。
+        val captureLegacy = preserveHistory && root.optInt("vp_ver", 0) < 3 && !root.optBoolean("vp_legacy_checked")
         for (i in 0 until segments.length()) {
             val s = segments.getJSONObject(i)
             val previousSpeaker = s.optString("speaker")
             val previousProtected = Proximity.isProtectedSpeakerId(previousSpeaker, roster)
             val previousEdited = previousProtected || roster[previousSpeaker]?.mergedInto != null
+            val legacySpeaker = if (captureLegacy && previousEdited) previousSpeaker else s.optString("vp_legacy_speaker")
             val override = manual[i]
-            val keepHistory = preserveHistory && previousEdited &&
-                (override == null || (override == NOT_SELF && previousSpeaker !in selfIds))
-            val speaker = when {
-                keepHistory -> previousSpeaker
-                else -> assigned[i] ?: "other_${++other}"
-            }
+            val keepLegacy = preserveHistory && legacySpeaker.isNotBlank() &&
+                (override == null || (override == NOT_SELF && legacySpeaker !in selfIds))
+            val speaker = if (keepLegacy) legacySpeaker else assigned[i] ?: "other_${++other}"
             val isProtected = Proximity.isProtectedSpeakerId(speaker, roster)
             s.put("speaker", speaker)
+            if (keepLegacy) s.put("vp_legacy_speaker", legacySpeaker) else s.remove("vp_legacy_speaker")
             if (manual.containsKey(i)) s.put("vp_manual", manual.getValue(i)) else s.remove("vp_manual")
             // 身份保护改变了连续段边界，仍有录音时需要重新计算整段。
             if (previousSpeaker != speaker && isProtected != previousProtected) {
@@ -577,6 +578,7 @@ internal object Voiceprint {
                 s.put("proximity", Proximity.NEAR)
             }
         }
+        if (captureLegacy) root.put("vp_legacy_checked", true)
     }
 
     fun enrichTranscript(ctx: Context, opusFile: File, transcriptJson: JSONObject): JSONObject {
@@ -594,7 +596,7 @@ internal object Voiceprint {
         }
         val cache = cachedSegments(ctx, opusFile, segments) ?: return false
         applyAssignments(ctx, opusFile.name, root, cache, preserveHistory)
-        root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
+        root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION).remove("vp_legacy_checked")
         return true
     }
 

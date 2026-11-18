@@ -232,6 +232,27 @@ class VoiceprintTest {
         assertEquals(Speakers.selfIdentity(ctx), Transcripts.get(ctx, name)?.segments?.first()?.speaker)
     }
 
+    @Test fun newSeedCorrectsAutomaticV3Assignment() {
+        val name = "20261113-122001.opus"
+        val me = Speakers.selfIdentity(ctx)
+        val friend = Speakers.namedIdentity(ctx, "朋友")
+        Voiceprint.addEnrollment(ctx, me, "20261113-122002.opus", 0.0, 2.0, vector(0.0), "user")
+        Voiceprint.writeCache(ctx, name, listOf(
+            Voiceprint.CachedSegment(0.0, 2.0, vector(35.0)),
+            Voiceprint.CachedSegment(2.0, 2.4, null),
+        ))
+        val root = Voiceprint.enrichTranscript(ctx, File(RecorderService.chunkDir(ctx), name), transcript(name))
+        Transcripts.save(ctx, root)
+        assertEquals(me, Transcripts.get(ctx, name)?.segments?.first()?.speaker)
+
+        File(ctx.filesDir, "voice_seed.json").writeText(JSONObject().put("朋友", JSONArray()
+            .put(JSONObject().put("file", name).put("start", 0).put("end", 2))).toString())
+
+        Voiceprint.bootstrapIfNeeded(ctx)
+
+        assertEquals(friend, Transcripts.get(ctx, name)?.segments?.first()?.speaker)
+    }
+
     @Test fun rescoreKeepsNamedHistoryAndBothSidesOfAnUnnamedMerge() {
         val name = "20261113-122100.opus"
         val roster = JSONObject().put("items", JSONObject().put("named", JSONObject())
@@ -254,6 +275,12 @@ class VoiceprintTest {
         assertEquals(ids.take(3), speakers.take(3))
         assertTrue(speakers.last()?.startsWith("other_") == true)
         assertEquals("target", Speakers.resolve(ctx, speakers[1])?.id)
+
+        val friend = Speakers.namedIdentity(ctx, "朋友")
+        File(ctx.filesDir, "voice_seed.json").writeText(JSONObject().put("朋友", JSONArray()
+            .put(JSONObject().put("file", name).put("start", 3).put("end", 4))).toString())
+        assertTrue(Voiceprint.bootstrapIfNeeded(ctx))
+        assertEquals(ids.take(3) + friend, Transcripts.get(ctx, name)?.segments?.map { it.speaker })
     }
 
     @Test fun schemaMigrationInvalidatesAllOldPrototypesAndKeepsRosterMetadata() {

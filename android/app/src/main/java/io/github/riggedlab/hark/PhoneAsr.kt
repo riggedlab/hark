@@ -366,14 +366,21 @@ object PhoneAsr {
             val output = data.optJSONObject("output") ?: JSONObject()
             val durS = data.optJSONObject("usage")?.optDouble("duration", 0.0)?.takeIf { it > 0 } ?: localDur
             val segs = dashScopeSegments(output, enableSpeaker)
-            val sentences = output.optJSONArray("sentences") ?: JSONArray()
-            val fullText = output.optString("text").trim().ifEmpty {
-                (0 until sentences.length()).joinToString("") { sentences.getJSONObject(it).optString("text") }
-                    .ifBlank { output.optJSONObject("sentence")?.optString("text").orEmpty() }
-            }
-            // sentence.words 可能只有末句。时间戳覆盖不全时，以整段原文回退到合成段。
             val timedText = segs.joinToString("") { it.text }
-            val complete = fullText.isBlank() || dashScopeTextKey(fullText) == dashScopeTextKey(timedText)
+            val timedKey = dashScopeTextKey(timedText)
+            val fullText = (output.opt("text") as? String).orEmpty().trim().ifEmpty {
+                val sentences = output.optJSONArray("sentences") ?: JSONArray()
+                val sentenceText = (0 until sentences.length()).joinToString("") {
+                    (sentences.getJSONObject(it).opt("text") as? String).orEmpty()
+                }.ifBlank { (output.optJSONObject("sentence")?.opt("text") as? String).orEmpty() }
+                val sentenceKey = dashScopeTextKey(sentenceText)
+                // 全文缺失时，sentence.text 可能只有末句，而 words 已经包含前文。
+                val wordsCoverMore = timedKey.codePointCount(0, timedKey.length) >
+                    sentenceKey.codePointCount(0, sentenceKey.length)
+                if (sentenceText.isBlank() || wordsCoverMore) timedText else sentenceText
+            }
+            // 时间戳覆盖不全时，以整段原文回退到合成段。
+            val complete = fullText.isBlank() || dashScopeTextKey(fullText) == timedKey
             return buildTranscriptJson(name, durS, fullText, cfg.provider.id, cfg.model, if (complete) segs else emptyList())
         }
     }
