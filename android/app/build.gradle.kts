@@ -27,8 +27,8 @@ android {
         applicationId = "io.github.riggedlab.hark"
         minSdk = 29
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = 6
+        versionName = "0.1.5"
         ndk { abiFilters += listOf("arm64-v8a") }   // 只打包 64 位 ARM，安装包小很多
         buildConfigField("String", "DEFAULT_SERVER_URL", "\"${secrets.getProperty("SERVER_URL", "")}\"")
         buildConfigField("String", "DEFAULT_PHONE_TOKEN", "\"${secrets.getProperty("PHONE_TOKEN", "")}\"")
