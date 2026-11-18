@@ -1,0 +1,6 @@
+[project]
+name = "hark-voiceprint-lab"
+version = "0.0.0"
+description = "离线声纹实验：用手机真实录音评估说话人识别方案"
+requires-python = ">=3.11"
+dependencies = ["numpy", "sherpa-onnx", "soundfile", "scikit-learn", "scipy"]
