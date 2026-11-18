@@ -30,6 +30,8 @@ internal object Proximity {
     const val FAR = "far"
     const val MEDIA = "media"
 
+    fun isBackground(label: String?): Boolean = label == FAR || label == MEDIA
+
     private const val SAMPLE_RATE = 16000
     private const val FRAME_LEN = 320 // 20ms @ 16kHz
     private const val FFT_N = 512
@@ -212,6 +214,23 @@ internal object Proximity {
         return roster.values.any { it.mergedInto == cur.id }
     }
 
+    fun selfSpeakerIds(roster: Map<String, Speaker>): Set<String> {
+        val explicit = roster.values
+            .filter { it.mergedInto == null && isSelfDisplayName(it.name) }
+            .map { it.id }
+            .toSet()
+        if (explicit.isNotEmpty()) return explicit
+        val fallback = roster.values.firstOrNull {
+            it.mergedInto == null && (it.id == "spk_001" || it.id == "spk_01") && it.name == null
+        }
+        return if (fallback != null) setOf(fallback.id) else emptySet()
+    }
+
+    fun isSelfDisplayName(name: String?): Boolean = when (name?.trim()?.lowercase()) {
+        "我", "本人", "自己", "me" -> true
+        else -> false
+    }
+
     /**
      * 综合局部信噪比、CED-Tiny 空间/发声概率与中高频占比，输出 "near" | "far" | "media"。
      * nearMargin 用作整段预筛时的保守余量（默认 0f；整段拦截传 -0.18f 宁可保留临界低语）。
@@ -315,6 +334,53 @@ internal object Proximity {
                 }
             }
         }
+    }
+
+    data class Turn(
+        val start: Double,
+        val end: Double,
+        val db: Float?,
+        val label: String?,
+        val protectedSpeaker: Boolean = false,
+    )
+
+    // 对连续轮次作多数平滑。沿用对话段落的 3 秒停顿和 6 dB 音量差尺度，
+    // 让已知说话人、停顿或明显不同音量的插话保留自己的判定。
+    fun refineMediaTurns(turns: List<Turn>): List<String?> {
+        val labels = turns.map { it.label }.toMutableList()
+        val run = ArrayList<Int>()
+        var runEnd = Double.NEGATIVE_INFINITY
+
+        fun finishRun() {
+            val mediaDbs = run.mapNotNull { i ->
+                turns[i].db?.takeIf { turns[i].label == MEDIA }
+            }.sorted()
+            val count = mediaDbs.size
+            if (count >= 2 && count > run.size / 2) {
+                val medianDb = (mediaDbs[(count - 1) / 2] + mediaDbs[count / 2]) / 2f
+                for (i in run) {
+                    val db = turns[i].db ?: continue
+                    if (abs(db - medianDb) < 6f) labels[i] = MEDIA
+                }
+            }
+            run.clear()
+            runEnd = Double.NEGATIVE_INFINITY
+        }
+
+        for (i in turns.indices.sortedBy { turns[it].start }) {
+            val turn = turns[i]
+            if (turn.protectedSpeaker || turn.label == null || turn.db?.isFinite() != true ||
+                !turn.start.isFinite() || !turn.end.isFinite() || turn.end <= turn.start
+            ) {
+                finishRun()
+                continue
+            }
+            if (turn.start - runEnd >= 3.0) finishRun()
+            run.add(i)
+            runEnd = maxOf(runEnd, turn.end)
+        }
+        finishRun()
+        return labels
     }
 
     /**

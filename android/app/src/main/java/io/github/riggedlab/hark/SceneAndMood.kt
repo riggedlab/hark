@@ -30,14 +30,15 @@ import kotlin.math.sqrt
 
 /**
  * 100% 本机离线、与第三方云端 ASR 完全解耦的「环境音识别 + 讲话人心情评分」引擎：
- * 1. 环境音与人声副语言：基于 CED-Tiny (AudioSet 527 类 INT8 ONNX, 5.85MB) + 16 类高置信生活场景白名单，
+ * 1. 环境音与人声副语言：基于 CED-Tiny (AudioSet 527 类 INT8 ONNX, 5.85MB) + 14 类高置信生活场景白名单，
  *    无显著外源噪声时显式标注「室内安静」，确保每一段录音都有准确环境音标签；
  * 2. 讲话人心情与评分：基于 BGE-Small-ZH-v1.5 (INT8 ONNX, 22.9MB) + 口语情绪校准头 (mood_head_zh.json)，
  *    融合同句原声中的笑声/叹气副语言及语速、相对响度突变，输出严格自洽的 mood (positive/neutral/negative) 与 mood_score ([-1, +1])。
  */
 internal object SceneAndMood {
     private const val TAG = "SceneAndMood"
-    const val SCHEMA_VERSION = 2
+    private const val AUDIO_SCHEMA_VERSION = 3
+    private const val TEXT_SCHEMA_VERSION = 2
     private const val SCENE_SIDECAR_VERSION = 1
 
     const val CED_ASSET = "ced_tiny_audio_tagging_int8.onnx"
@@ -68,6 +69,8 @@ internal object SceneAndMood {
 
     fun sceneDir(ctx: Context) = File(ctx.filesDir, "scenes").apply { mkdirs() }
 
+    internal fun isVisibleSceneLabel(label: String): Boolean = label != "宠物叫声" && label != "鸟鸣"
+
     /** 读取某段录音的环境音标签（优先独立 sidecar，兼容转写内嵌字段，不依赖 ASR 成功与否） */
     fun getSceneTags(ctx: Context, name: String): List<SceneTag> {
         if (!Features.scene(ctx)) return emptyList()
@@ -85,8 +88,9 @@ internal object SceneAndMood {
                 }
             }.getOrDefault(emptyList())
             if (parsed.isNotEmpty()) {
-                sceneMem[name] = parsed
-                return parsed
+                val visible = parsed.filter { isVisibleSceneLabel(it.label) }
+                sceneMem[name] = visible
+                return visible
             }
         }
         return Transcripts.get(ctx, name)?.sceneTags ?: emptyList()
@@ -98,7 +102,7 @@ internal object SceneAndMood {
         for (t in tags) arr.put(JSONObject().put("label", t.label).put("score", t.score.toDouble()))
         val root = JSONObject().put("ver", SCENE_SIDECAR_VERSION).put("scene_tags", arr)
         Sync.writeFile(File(sceneDir(ctx), "$name.json"), root.toString())
-        sceneMem[name] = tags
+        sceneMem[name] = tags.filter { isVisibleSceneLabel(it.label) }
     }
 
     fun sceneSignature(ctx: Context): String {
@@ -169,7 +173,7 @@ internal object SceneAndMood {
             val trFile = File(Transcripts.dir(ctx), "$name.json")
             val trNeedsAudio = trFile.exists() && runCatching {
                 val r = JSONObject(trFile.readText())
-                r.optInt("sm_audio_ver", 0) < SCHEMA_VERSION ||
+                r.optInt("sm_audio_ver", 0) < AUDIO_SCHEMA_VERSION ||
                     (r.optJSONArray("segments")?.let { segs ->
                         (0 until segs.length()).any { idx ->
                             val s = segs.getJSONObject(idx)
@@ -208,7 +212,7 @@ internal object SceneAndMood {
             val trFile = File(Transcripts.dir(ctx), "$name.json")
             val needsText = runCatching {
                 val r = JSONObject(trFile.readText())
-                r.optInt("sm_audio_ver", 0) < SCHEMA_VERSION && r.optInt("sm_text_ver", 0) < SCHEMA_VERSION
+                r.optInt("sm_audio_ver", 0) < TEXT_SCHEMA_VERSION && r.optInt("sm_text_ver", 0) < TEXT_SCHEMA_VERSION
             }.getOrDefault(false)
             if (!needsText) continue
 
@@ -252,7 +256,7 @@ internal object SceneAndMood {
         val isVocalAction: Boolean = false,
     )
 
-    // 收敛后的 16 类高价值日常环境音与副语言白名单（彻底屏蔽 AudioSet 冷门长尾误报）
+    // 日常环境音与副语言白名单
     internal val SCENE_RULES = listOf(
         CategoryRule("敲键盘", intArrayOf(384, 386), 0.18f),
         CategoryRule("背景音乐", intArrayOf(137, 267, 27), 0.24f),
@@ -263,8 +267,6 @@ internal object SceneAndMood {
         CategoryRule("风声", intArrayOf(283, 285), 0.22f),
         CategoryRule("雨声流水", intArrayOf(288, 289, 290, 291, 292, 370), 0.22f),
         CategoryRule("开关门", intArrayOf(354, 355, 357, 358, 359), 0.22f),
-        CategoryRule("宠物叫声", intArrayOf(74, 75, 80, 81, 83), 0.24f),
-        CategoryRule("鸟鸣", intArrayOf(111, 112), 0.24f),
         CategoryRule("铃声提示", intArrayOf(388, 390, 391, 395, 396), 0.24f),
         CategoryRule("笑声", intArrayOf(16, 17, 18, 19, 20, 21), 0.20f, isVocalAction = true),
         CategoryRule("叹气", intArrayOf(26, 38, 22), 0.20f, isVocalAction = true),
@@ -730,8 +732,8 @@ internal object SceneAndMood {
         // 环境音识别关闭时 sceneTags 为空：保留文件里原有的 scene_tags，不覆盖
         if (sceneTags.isNotEmpty()) root.put("scene_tags", sceneArr)
         enrichSegmentsMoodInternal(ctx, pcm16k, root)
-        root.put("sm_audio_ver", SCHEMA_VERSION)
-        root.put("sm_text_ver", SCHEMA_VERSION)
+        root.put("sm_audio_ver", AUDIO_SCHEMA_VERSION)
+        root.put("sm_text_ver", TEXT_SCHEMA_VERSION)
         Log.i(
             TAG,
             "${root.optString("name")}: 环境音=${sceneTags.map { "${it.label}(${it.score})" }} + 心情完成，耗时 ${System.currentTimeMillis() - t0}ms",
@@ -744,7 +746,7 @@ internal object SceneAndMood {
      */
     fun enrichTextOnly(ctx: Context, root: JSONObject): JSONObject = runCatching {
         enrichSegmentsMoodInternal(ctx, null, root)
-        root.put("sm_text_ver", SCHEMA_VERSION)
+        root.put("sm_text_ver", TEXT_SCHEMA_VERSION)
         root
     }.onFailure { e ->
         Log.w(TAG, "enrichTextOnly skipped: ${e.message}")
@@ -781,73 +783,81 @@ internal object SceneAndMood {
         }
         val (chunkMedHf, chunkP90Db) = Proximity.chunkReferenceStats(acoustics.toList())
         val proximities = arrayOfNulls<String>(nSegs)
+        val cedBySegment = arrayOfNulls<FloatArray>(nSegs)
 
-        // 统计各说话人本段内的平均分贝，用于判断单句相对音量突增/突降
+        // 先完成逐句远近判定及上下文平滑，再决定哪些句子需要情绪推理。
+        if (proxProfile != null && pcm16k != null) {
+            val selfIds = Proximity.selfSpeakerIds(roster)
+            val protectedSpeakers = BooleanArray(nSegs) {
+                spks[it] in selfIds || Proximity.isProtectedSpeakerId(spks[it], roster)
+            }
+            for (i in 0 until nSegs) {
+                val ac = acoustics[i] ?: continue
+                if (segArr.getJSONObject(i).optString("text").isBlank()) continue
+                val st = starts[i]
+                val ed = ends[i]
+                if (ed - st >= 0.7) {
+                    val padS = ((st - 0.15).coerceAtLeast(0.0) * SAMPLE_RATE).toInt().coerceIn(0, pcm16k.size)
+                    val padE = (min(ed + 0.25, st + 5.0) * SAMPLE_RATE).toInt().coerceIn(padS, pcm16k.size)
+                    if (padE - padS >= SAMPLE_RATE / 2) {
+                        cedBySegment[i] = inferCedProbs(ctx, pcm16k, padS, padE)
+                    }
+                }
+                proximities[i] = Proximity.classifySegment(
+                    acoustic = ac,
+                    chunkMedianHfLfDb = chunkMedHf,
+                    chunkP90Db = chunkP90Db,
+                    cedProbs = cedBySegment[i],
+                    isProtectedSpeaker = protectedSpeakers[i],
+                )
+            }
+            Proximity.smoothShortSegments(starts, ends, spks, acoustics, proximities)
+            val turns = List(nSegs) { i ->
+                Proximity.Turn(starts[i], ends[i], acoustics[i]?.activeDb, proximities[i], protectedSpeakers[i])
+            }
+            Proximity.refineMediaTurns(turns).forEachIndexed { i, label ->
+                if (label != null) segArr.getJSONObject(i).put("proximity", label)
+            }
+        }
+
+        // 只用前景发言统计说话人的平均分贝。
         val spkDbLists = HashMap<String, MutableList<Float>>()
         for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
-            val spk = o.optString("speaker").ifBlank { "_anon" }
-            if (o.has("db") && !o.isNull("db")) {
-                val db = o.optDouble("db", Double.NaN)
-                if (!db.isNaN()) spkDbLists.getOrPut(spk) { ArrayList() }.add(db.toFloat())
+            if (Proximity.isBackground(o.optString("proximity"))) {
+                o.remove("mood")
+                o.remove("mood_score")
+                o.remove("vocal_tag")
+                continue
+            }
+            val db = o.optDouble("db", Double.NaN)
+            if (db.isFinite()) {
+                val spk = spks[i] ?: "_anon"
+                spkDbLists.getOrPut(spk) { ArrayList() }.add(db.toFloat())
             }
         }
         val spkMeanDb = spkDbLists.mapValues { (_, v) -> v.average().toFloat() }
 
         for (i in 0 until nSegs) {
             val o = segArr.getJSONObject(i)
+            if (Proximity.isBackground(o.optString("proximity"))) continue
             val txt = o.optString("text").trim()
             if (txt.isEmpty()) continue
-
-            val semProbs = predictSemanticMoodProbs(ctx, txt)
-
-            var laughP = 0f
-            var sighP = 0f
-            var applauseP = 0f
-            var coughP = 0f
-            var cProbs: FloatArray? = null
-
-            val st = starts[i]
-            val ed = ends[i]
-            if (pcm16k != null && ed - st >= 0.7) {
-                val padS = ((st - 0.15).coerceAtLeast(0.0) * SAMPLE_RATE).toInt().coerceIn(0, pcm16k.size)
-                val maxClipEnd = min(ed + 0.25, st + 5.0)
-                val padE = (maxClipEnd * SAMPLE_RATE).toInt().coerceIn(padS, pcm16k.size)
-                if (padE - padS >= SAMPLE_RATE / 2) {
-                    cProbs = inferCedProbs(ctx, pcm16k, padS, padE)
-                    if (cProbs != null) {
-                        laughP = maxProbOf(cProbs, LAUGH_INDICES)
-                        sighP = maxProbOf(cProbs, SIGH_INDICES)
-                        applauseP = maxProbOf(cProbs, APPLAUSE_INDICES)
-                        coughP = maxProbOf(cProbs, COUGH_INDICES)
-                    }
-                }
-            }
-
-            acoustics[i]?.let { ac ->
-                proximities[i] = Proximity.classifySegment(
-                    acoustic = ac,
-                    chunkMedianHfLfDb = chunkMedHf,
-                    chunkP90Db = chunkP90Db,
-                    cedProbs = cProbs,
-                    isProtectedSpeaker = Proximity.isProtectedSpeakerId(spks[i], roster),
-                )
-            }
-
-            val actS = o.optDouble("act_s", ed - st).takeIf { it > 0.05 }?.toFloat()
+            val cProbs = cedBySegment[i]
+            val actS = o.optDouble("act_s", ends[i] - starts[i]).takeIf { it > 0.05 }?.toFloat()
             val cjkLen = txt.count { it.isLetterOrDigit() || it.code >= 0x4E00 }
             val charsPerSec = if (actS != null && cjkLen >= 3) cjkLen / actS else null
-            val spkKey = o.optString("speaker").ifBlank { "_anon" }
+            val spkKey = spks[i] ?: "_anon"
             val curDb = if (o.has("db") && !o.isNull("db")) o.optDouble("db", Double.NaN).takeIf { !it.isNaN() }?.toFloat() else null
             val refDb = spkMeanDb[spkKey]
             val deltaDb = if (curDb != null && refDb != null && (spkDbLists[spkKey]?.size ?: 0) >= 2) curDb - refDb else null
 
             val res = fuseUtteranceMood(
-                semProbs = semProbs,
-                laughProb = laughP,
-                sighProb = sighP,
-                applauseProb = applauseP,
-                coughProb = coughP,
+                semProbs = predictSemanticMoodProbs(ctx, txt),
+                laughProb = cProbs?.let { maxProbOf(it, LAUGH_INDICES) } ?: 0f,
+                sighProb = cProbs?.let { maxProbOf(it, SIGH_INDICES) } ?: 0f,
+                applauseProb = cProbs?.let { maxProbOf(it, APPLAUSE_INDICES) } ?: 0f,
+                coughProb = cProbs?.let { maxProbOf(it, COUGH_INDICES) } ?: 0f,
                 charsPerActiveSec = charsPerSec,
                 deltaDbFromSpeakerMean = deltaDb,
             )
@@ -857,13 +867,6 @@ internal object SceneAndMood {
                 o.put("vocal_tag", res.vocalTag)
             } else {
                 o.remove("vocal_tag")
-            }
-        }
-
-        if (proxProfile != null) {
-            Proximity.smoothShortSegments(starts, ends, spks, acoustics, proximities)
-            for (i in 0 until nSegs) {
-                proximities[i]?.let { segArr.getJSONObject(i).put("proximity", it) }
             }
         }
     }

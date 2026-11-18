@@ -131,6 +131,34 @@ class ProximityTest {
     }
 
     @Test
+    fun mediaMajorityOnlyPromotesSimilarTurnsInTheSameContinuousRun() {
+        val turns = listOf(
+            Proximity.Turn(0.0, 2.0, -49f, Proximity.MEDIA),
+            Proximity.Turn(2.1, 3.0, -50f, Proximity.NEAR),
+            Proximity.Turn(3.1, 4.0, -49f, Proximity.MEDIA),
+            Proximity.Turn(4.1, 6.0, -40f, Proximity.NEAR),
+            Proximity.Turn(6.1, 7.0, -48f, Proximity.MEDIA),
+            Proximity.Turn(10.0, 11.0, -49f, Proximity.FAR),
+        )
+        assertEquals(
+            listOf(Proximity.MEDIA, Proximity.MEDIA, Proximity.MEDIA, Proximity.NEAR, Proximity.MEDIA, Proximity.FAR),
+            Proximity.refineMediaTurns(turns),
+        )
+    }
+
+    @Test
+    fun protectedTurnBreaksMediaContextAndAMinorityDoesNotPromote() {
+        val turns = listOf(
+            Proximity.Turn(0.0, 1.0, -49f, Proximity.MEDIA),
+            Proximity.Turn(1.1, 2.0, -50f, Proximity.NEAR),
+            Proximity.Turn(2.1, 3.0, -49f, Proximity.NEAR, protectedSpeaker = true),
+            Proximity.Turn(3.1, 4.0, -48f, Proximity.MEDIA),
+            Proximity.Turn(4.1, 5.0, -49f, Proximity.FAR),
+        )
+        assertEquals(turns.map { it.label }, Proximity.refineMediaTurns(turns))
+    }
+
+    @Test
     fun farAndMediaClustersDoNotCreateGlobalPspkWhileMatchingExistingSpeaker() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val knownVec = Voiceprint.l2Normalize(FloatArray(192) { if (it == 0) 1f else 0.01f })
