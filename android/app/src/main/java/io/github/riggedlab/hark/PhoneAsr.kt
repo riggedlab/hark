@@ -332,7 +332,8 @@ object PhoneAsr {
                     "百炼鉴权失败 (HTTP $httpCode $apiCode)：请检查百炼 API Key、所属地域与接口地址是否匹配，并确认已开通模型 ${cfg.model}",
                 )
             }
-            if (apiCode == "Audio.AudioSilentError") {
+            // 无人声/没识别出字：百炼会以 400 返回，按空稿处理，不能卡住后续队列
+            if (apiCode == "Audio.AudioSilentError" || apiMsg.contains("ASR_RESPONSE_HAVE_NO_WORDS")) {
                 return buildTranscriptJson(name, localDur, "", cfg.provider.id, cfg.model, emptyList())
             }
             val parameterError = httpCode == 400 || httpCode == 422 || apiCode.startsWith("InvalidParameter") || apiCode == "UnsupportedParameter"

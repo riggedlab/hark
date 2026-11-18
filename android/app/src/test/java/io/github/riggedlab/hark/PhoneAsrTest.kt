@@ -250,6 +250,7 @@ class PhoneAsrTest {
     fun dashScopeSilenceEmptyAndSingleSentence() {
         val responses = listOf(
             HttpResp(status = 400, body = """{"code":"Audio.AudioSilentError","message":"silent audio"}"""),
+            HttpResp(status = 400, body = """{"code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS"}"""),
             HttpResp(body = """{"output":{"text":"","sentences":[]},"usage":{"duration":3.4}}"""),
             HttpResp(body = """{"output":{"text":"","sentence":null}}"""),
             HttpResp(body = """{"output":{"text":"全文"}}"""),
@@ -261,12 +262,12 @@ class PhoneAsrTest {
                 val result = PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, baseUrl, "k"), "test.opus", sampleOpus)
                 assertEquals(1, calls.get())
                 assertTrue(result.getDouble("duration_s") > 0)
-                if (index < 3) {
+                if (index < 4) {
                     assertEquals("", result.getString("text"))
                     assertEquals(0, result.getJSONArray("segments").length())
                 } else {
-                    assertEquals(if (index == 3) "全文" else "单句", result.getString("text"))
-                    assertEquals(index == 3, result.optBoolean("synthetic_segments"))
+                    assertEquals(if (index == 4) "全文" else "单句", result.getString("text"))
+                    assertEquals(index == 4, result.optBoolean("synthetic_segments"))
                     assertEquals(1, result.getJSONArray("segments").length())
                 }
             }

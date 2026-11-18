@@ -108,7 +108,8 @@ func transcribeDashScope(ctx context.Context, cfg Config, opus []byte) (Result, 
 				strings.HasPrefix(data.Code, "AccessDenied") || strings.HasSuffix(data.Code, ".AccessDenied") {
 				return Result{}, fmt.Errorf("百炼鉴权失败 (HTTP %d %s)：请检查百炼 API Key、所属地域与接口地址是否匹配，并确认已开通模型 %s", httpCode, data.Code, cfg.Model)
 			}
-			if data.Code == "Audio.AudioSilentError" {
+			// 无人声/没识别出字：百炼会以 400 返回，按空稿处理
+			if data.Code == "Audio.AudioSilentError" || strings.Contains(data.Message, "ASR_RESPONSE_HAVE_NO_WORDS") {
 				return Result{DurationS: math.Round(OggOpusDuration(opus)*100) / 100, Engine: ProviderDashScope, Model: cfg.Model, Segments: []Segment{}}, nil
 			}
 			parameterError := httpCode == 400 || httpCode == 422 || strings.HasPrefix(data.Code, "InvalidParameter") || data.Code == "UnsupportedParameter"

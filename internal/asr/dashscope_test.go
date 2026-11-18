@@ -145,6 +145,7 @@ func TestDashScopeEmptyAndSentenceResults(t *testing.T) {
 		synthetic        bool
 	}{
 		{"silent", `{"code":"Audio.AudioSilentError","message":"silent audio"}`, "", 400, false},
+		{"no words", `{"code":"CLIENT_ERROR","message":"ASR_RESPONSE_HAVE_NO_WORDS"}`, "", 400, false},
 		{"empty", `{"output":{"text":"","sentences":[]},"usage":{"duration":3.4}}`, "", 200, false},
 		{"null", `{"output":{"text":"","sentence":null}}`, "", 200, false},
 		{"text only", `{"output":{"text":"全文"}}`, "全文", 200, true},
