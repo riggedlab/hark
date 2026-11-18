@@ -3,6 +3,7 @@ package io.github.riggedlab.hark
 import android.content.Context
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -121,7 +122,10 @@ object Speakers {
     }
 
     fun resolve(ctx: Context, id: String?): Speaker? {
-        val m = all(ctx)
+        return resolve(all(ctx), id)
+    }
+
+    internal fun resolve(m: Map<String, Speaker>, id: String?): Speaker? {
         var cur = id?.let { m[it] } ?: return null
         val seen = HashSet<String>()
         while (cur.mergedInto != null && seen.add(cur.id)) cur = m[cur.mergedInto] ?: break
@@ -130,6 +134,42 @@ object Speakers {
 
     fun displayName(ctx: Context, id: String?): String? =
         id?.let { resolve(ctx, it)?.let { s -> s.name ?: s.defaultName } ?: it }
+
+    internal fun selfIds(roster: Map<String, Speaker>): Set<String> {
+        val explicit = roster.values.filter {
+            it.mergedInto == null && it.name?.trim()?.lowercase() in setOf("我", "本人", "自己", "me")
+        }.map { it.id }.toSet()
+        if (explicit.isNotEmpty()) return explicit
+        val fallback = listOf("spk_001", "spk_01").firstOrNull {
+            roster[it]?.let { s -> s.mergedInto == null && s.name == null } == true
+        }
+        return if (fallback != null) setOf(fallback) else emptySet()
+    }
+
+    /** 注册始终复用名册已有的「我」；空名册时只创建固定 self 身份。 */
+    @Synchronized
+    internal fun selfIdentity(ctx: Context): String {
+        val id = selfIds(all(ctx)).sorted().firstOrNull()
+        if (id != null) {
+            if (resolve(ctx, id)?.name == null) edit(ctx, id, name = "我")
+            return id
+        }
+        return namedIdentity(ctx, "我", preferredId = "self")
+    }
+
+    /** 只有用户/种子显式指定名字才建身份，不自动生成 pspk_ 人物。 */
+    @Synchronized
+    internal fun namedIdentity(ctx: Context, name: String, preferredId: String? = null): String {
+        val roster = all(ctx)
+        roster.values.firstOrNull { it.name == name }?.let { return resolve(ctx, it.id)?.id ?: it.id }
+        val id = preferredId ?: "person_${UUID.randomUUID()}"
+        val file = File(ctx.filesDir, "speakers_local.json")
+        val root = read(ctx, "speakers_local").put("version", Voiceprint.SCHEMA_VERSION)
+        root.getJSONObject("items").put(id, JSONObject())
+        Sync.writeFile(file, root.toString())
+        check(edit(ctx, id, name = name))
+        return id
+    }
 
     fun edit(ctx: Context, id: String, name: String? = null, mergeInto: String? = null, unmerge: Boolean = false): Boolean {
         synchronized(this) {

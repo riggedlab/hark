@@ -343,7 +343,7 @@ class ChunkRecorderTest {
         } finally { dir.deleteRecursively() }
     }
 
-    @Test fun longConversationSoftCutsOnPauseAfter4MinAndHardCapsAt6Min() {
+    @Test fun longConversationSoftCutsOnPauseAfter4MinAndHardCapsBeforeFiveMin() {
         val dir = Files.createTempDirectory("chunks-long-talk").toFile()
         try {
             var fakeMs = 1_760_003_000_000L
@@ -351,8 +351,8 @@ class ChunkRecorderTest {
             val c = ChunkRecorder(dir, onChunkReady = { ready++ }, nowEpochMs = { fakeMs })
             var seq = 0
 
-            // 连续讲话 5 分 10 秒（中间停顿都 < 1 秒），跨过 4 分钟和 5 分钟时绝不能硬劈句子
-            repeat(310 * 50) { i ->
+            // 连续讲话 4 分 10 秒，尚未达到百炼 4 分 50 秒硬切上限
+            repeat(250 * 50) { i ->
                 c.onPacket(seq++ and 0xffff, audio)
                 if (i % 10 == 0) c.onSpeechDetected()
                 fakeMs += 20
@@ -366,7 +366,7 @@ class ChunkRecorderTest {
             }
             assertEquals(1, ready)
 
-            // 下一段如果连讲满 6 分钟一秒都不停，在 6 分钟上限兜底硬切
+            // 下一段连续讲话，在百炼 5 分钟限制前 10 秒硬切
             repeat(ChunkRecorder.HARD_MAX_PACKETS) { i ->
                 c.onPacket(seq++ and 0xffff, audio)
                 if (i % 5 == 0) c.onSpeechDetected()
@@ -375,8 +375,8 @@ class ChunkRecorderTest {
             assertEquals(2, ready)
             val files = dir.listFiles { f -> f.name.endsWith(".opus") }!!.sortedBy { it.name }
             assertEquals(2, files.size)
-            assertEquals(312.5, Recordings.oggDurationSec(files[0]), 0.2)
-            assertEquals(360.0, Recordings.oggDurationSec(files[1]), 0.2)
+            assertEquals(252.5, Recordings.oggDurationSec(files[0]), 0.2)
+            assertEquals(290.0, Recordings.oggDurationSec(files[1]), 0.2)
         } finally { dir.deleteRecursively() }
     }
 }

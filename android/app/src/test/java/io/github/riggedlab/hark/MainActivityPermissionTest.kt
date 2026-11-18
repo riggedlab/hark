@@ -9,6 +9,7 @@ import android.view.View
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import org.junit.Assert.*
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -32,6 +33,10 @@ class MainActivityPermissionTest {
         shadowOf(rule.activity).denyPermissions(Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    @After fun clearRecorderStatus() {
+        AppState.update { Status() }
     }
 
     @Suppress("DEPRECATION") // 模拟系统将权限结果交回 Activity，而非直接调用业务方法。

@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -312,3 +316,58 @@ func pad6(n int) string {
 	})
 	return s[len(s)-6:]
 }
+
+// 错误被传到上层后，下一批和重建 Engine 也不能再次发送同一份可能已计费的音频。
+func TestDashScopePermanentFailuresAreSkippedAcrossWorkerPolls(t *testing.T) {
+	old := http.DefaultTransport
+	defer func() { http.DefaultTransport = old }()
+	for _, readTimeout := range []bool{false, true} {
+		calls := 0
+		http.DefaultTransport = workerASRTransport(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Host != "asr.test" {
+				return old.RoundTrip(r)
+			}
+			calls++
+			if readTimeout {
+				return nil, &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+			}
+			return &http.Response{StatusCode: 400, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"code":"InvalidFile.AudioLengthError"}`))}, nil
+		})
+		key := bytes.Repeat([]byte{1}, 32)
+		const name = "20261113-160000.opus"
+		iid, _ := e2ee.ItemID(key, name)
+		packet, err := e2ee.PackAudio(key, name, []byte("OggS-fake-opus"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		downloads := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { downloads++; _, _ = w.Write(packet) }))
+		store, err := OpenStore(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{ServerURL: srv.URL, ASR: asr.Config{Provider: asr.ProviderDashScope, BaseURL: "http://asr.test", APIKey: "k"}}
+		client := &http.Client{Transport: old}
+		eng := NewEngine(cfg, store, nil)
+		err = eng.processOne(context.Background(), cfg, key, client, iid)
+		want := asr.ErrBadAudio
+		if readTimeout {
+			want = asr.ErrReadTimeout
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("readTimeout=%v error=%v", readTimeout, err)
+		}
+		if err := NewEngine(cfg, store, nil).processOne(context.Background(), cfg, key, client, iid); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || downloads != 1 {
+			t.Fatalf("readTimeout=%v calls=%d downloads=%d", readTimeout, calls, downloads)
+		}
+		store.Close()
+		srv.Close()
+	}
+}
+
+type workerASRTransport func(*http.Request) (*http.Response, error)
+
+func (f workerASRTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

@@ -91,10 +91,10 @@ data class ModelAssetSpec(
 
 val bundledModelSpecs = listOf(
     ModelAssetSpec(
-        cacheFileName = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
-        assetFileName = "campplus_zh_16k.onnx",
-        sha256 = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
-        url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+        cacheFileName = "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+        assetFileName = "campplus_zh_en_adv_16k.onnx",
+        sha256 = "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+        url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
     ),
     ModelAssetSpec(
         cacheFileName = "ced_tiny_audio_tagging_int8.onnx",
@@ -138,7 +138,9 @@ val syncProbeAsset by tasks.registering {
     inputs.property("modelShas", bundledModelSpecs.joinToString(",") { "${it.assetFileName}:${it.sha256}" })
     outputs.dir(outDir)
     doLast {
-        val dir = outDir.get().asFile.apply { mkdirs() }
+        val dir = outDir.get().asFile
+        // 模型升级后，旧文件名不能残留在生成目录并被一起打进 APK。
+        check(dir.deleteRecursively() && dir.mkdirs()) { "Cannot recreate generated model assets directory" }
         probeSrc.copyTo(File(dir, "probe.opus"), overwrite = true)
 
         for (spec in bundledModelSpecs) {

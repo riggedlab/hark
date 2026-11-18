@@ -2,7 +2,7 @@
 
 - 注册：标注里所有「我」的句子（相当于用户在 App 里点过「这是我」）。
 - 打分：同一段录音里先把 >=0.8s 的句子按声音聚成组，短句挂到最像的组；
-  分数 = 0.3*句子自身相似度 + 0.7*所在组相似度 + 0.01*(dB+35)。
+  分数 = (1-wg)*句子自身相似度 + wg*所在组相似度 + 0.01*(dB+35)，wg 随句长从 0.8 降到 0.2（与 Android Voiceprint.kt 一致）。
 - 阈值：在标注上做「留一段录音」交叉验证，取别人/外放被误认成我 <= 2% 的阈值，避免背答案。
 用法: uv run python identify_me.py <emb.npz> <label_dir>[,<label_dir2>...] <out.json>
 """
@@ -10,7 +10,12 @@ import sys, json, collections
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 
-LONG_S, CLUSTER_DIST, W_OWN, W_CLUSTER, W_DB = 0.8, 0.6, 0.3, 0.7, 0.01
+LONG_S, CLUSTER_DIST, W_DB = 0.8, 0.6, 0.01
+
+
+def group_weight(dur):
+    """长句信自己、短句信组：2026-11-13 标注 391 条上，固定 0.7 会把同录音里的别人拉进「我」组。"""
+    return float(np.clip(0.8 - 0.6 * dur / 4, 0.2, 0.8))
 
 
 def load_labels(dirs):
@@ -65,7 +70,8 @@ def score_all(E, M, group_of, dur, centroid, subset):
             v = (E[g] * dur[g, None]).sum(0)
             cache[key] = float((v / np.linalg.norm(v)) @ centroid)
         db = M[i].get("db")
-        out[i] = W_OWN * float(E[i] @ centroid) + W_CLUSTER * cache[key] + W_DB * ((db if db is not None else -50) + 35)
+        wg = group_weight(dur[i])
+        out[i] = (1 - wg) * float(E[i] @ centroid) + wg * cache[key] + W_DB * ((db if db is not None else -50) + 35)
     return out
 
 

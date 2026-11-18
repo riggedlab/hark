@@ -150,6 +150,14 @@ data class AsrConfig(
             )
         }
 
+        /** 每家服务商各存一份密钥：切换服务商时换成对应的密钥，避免把豆包的 Key 发给百炼导致 401。 */
+        fun savedKey(ctx: Context, provider: AsrProvider): String {
+            val p = ctx.getSharedPreferences("config", Context.MODE_PRIVATE)
+            p.getString("asr_api_key_${provider.id}", null)?.let { return it }
+            // 升级前只存了一份：只有当时保存的服务商就是它时才沿用
+            return if (p.getString("asr_provider", null) == provider.id) p.getString("asr_api_key", null) ?: "" else ""
+        }
+
         fun statusHint(ctx: Context): String? = rawValues(ctx).validationError()
 
         fun load(ctx: Context): AsrConfig? {
@@ -162,10 +170,11 @@ data class AsrConfig(
                 .putString("asr_provider", cfg.provider.id)
                 .putString("asr_base_url", cfg.baseUrl.trim())
                 .putString("asr_api_key", cfg.apiKey.trim())
+                .putString("asr_api_key_${cfg.provider.id}", cfg.apiKey.trim())
                 .putString("asr_app_id", cfg.appId.trim())
                 .putString("asr_model", cfg.model.trim())
                 .apply()
-            Uploader.clearLocalAsrFailures()
+            Uploader.clearLocalAsrFailures(ctx)
             AppState.update { it.copy(localAsrError = null) }
         }
     }

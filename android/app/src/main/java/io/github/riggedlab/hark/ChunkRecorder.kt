@@ -297,7 +297,7 @@ class ChunkRecorder(
         const val CONVERSATION_IDLE_PACKETS = 35 * FRAMES_PER_SEC       // 35 秒：对话结束后连续 35 秒无人声即封包上传
         const val SOFT_CUT_MIN_PACKETS = 4 * 60 * FRAMES_PER_SEC        // 4 分钟：长对话满 4 分钟后趁停顿软切防劈句
         const val SOFT_CUT_PAUSE_PACKETS = 125                          // 2.5 秒（125 帧）：长对话软切所需的换气停顿
-        const val HARD_MAX_PACKETS = 6 * 60 * FRAMES_PER_SEC            // 6 分钟：持续不停嘴时的硬切上限
+        const val HARD_MAX_PACKETS = (4 * 60 + 50) * FRAMES_PER_SEC     // 百炼单段上限 5 分钟，提前 10 秒硬切
         const val MAX_FILL_GAP = 500                                    // 10 秒以内的空缺用静音补（设备安静时每秒声明一次）
 
         // Silero VAD 窗口 32ms：1.5s 音频跨度（75 帧）内命中 ≥ 14 个窗口（~0.45s 人声），或本段累计 ≥ 38 个窗口（~1.2s）即确认进入对话

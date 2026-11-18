@@ -6,6 +6,7 @@ import org.junit.Test
 import java.io.File
 import java.io.InputStream
 import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.time.LocalDate
@@ -231,17 +232,17 @@ class PhoneAsrTest {
                 1 -> HttpResp(status = 503, body = """{"code":"ServiceUnavailable"}""")
                 2 -> HttpResp(status = 400, body = """{"code":"InvalidParameter","message":"speaker_diarization_enabled is not supported"}""")
                 3 -> HttpResp(status = 429, body = """{"code":"Throttling"}""")
-                else -> HttpResp(body = """{"output":{"text":"你好。再见。","sentence":{"text":"再见。","begin_time":1000,"end_time":2000,"speaker_id":null}},"usage":{"duration":3}}""")
+                else -> HttpResp(body = """{"output":{"text":"你好。再见。","sentence":{"text":"再见。","begin_time":1000,"end_time":2000,"speaker_id":null,"words":[{"text":"你好","punctuation":"。","begin_time":100,"end_time":800},{"text":"再见。","begin_time":1000,"end_time":2000}]}},"usage":{"duration":3}}""")
             }
         }) { baseUrl ->
             val result = PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, baseUrl, "k"), "test.opus", sampleOpus)
             assertEquals(4, calls.get())
             assertEquals("你好。再见。", result.getString("text"))
-            assertTrue(result.getBoolean("synthetic_segments"))
+            assertFalse(result.optBoolean("synthetic_segments"))
             val segs = result.getJSONArray("segments")
-            assertEquals(1, segs.length())
-            assertEquals("你好。再见。", segs.getJSONObject(0).getString("text"))
-            assertEquals(3.0, segs.getJSONObject(0).getDouble("end"), 0.001)
+            assertEquals(2, segs.length())
+            assertEquals("你好。", segs.getJSONObject(0).getString("text"))
+            assertEquals(2.0, segs.getJSONObject(1).getDouble("end"), 0.001)
             assertFalse(segs.getJSONObject(0).has("speaker"))
         }
     }
@@ -267,7 +268,7 @@ class PhoneAsrTest {
                     assertEquals(0, result.getJSONArray("segments").length())
                 } else {
                     assertEquals(if (index == 4) "全文" else "单句", result.getString("text"))
-                    assertEquals(index == 4, result.optBoolean("synthetic_segments"))
+                    assertTrue(result.optBoolean("synthetic_segments"))
                     assertEquals(1, result.getJSONArray("segments").length())
                 }
             }
@@ -283,6 +284,8 @@ class PhoneAsrTest {
             Case(HttpResp(body = """{"code":"InvalidApiKey"}"""), AsrFailureKind.AUTH_OR_CONFIG),
             Case(HttpResp(status = 400, body = """{"code":"InvalidParameter","message":"unknown model"}"""), AsrFailureKind.AUTH_OR_CONFIG),
             Case(HttpResp(status = 400, body = """{"code":"Audio.DecoderError","message":"invalid audio"}"""), AsrFailureKind.BAD_AUDIO),
+            Case(HttpResp(status = 400, body = """{"code":"InvalidFile.AudioLengthError","message":"too long"}"""), AsrFailureKind.BAD_AUDIO),
+            Case(HttpResp(status = 500, body = """{"code":"InvalidFile.FormatError","message":"bad file"}"""), AsrFailureKind.BAD_AUDIO),
             Case(HttpResp(status = 400, body = """{"code":"InvalidParameter","message":"speaker_diarization_enabled unsupported"}"""), AsrFailureKind.AUTH_OR_CONFIG, 2),
             Case(HttpResp(body = "{"), AsrFailureKind.TRANSIENT),
         )
@@ -296,6 +299,50 @@ class PhoneAsrTest {
                 assertEquals(case.calls, calls.get())
                 if (case.response.status in listOf(401, 403)) assertTrue(ex.message.orEmpty().contains("地域"))
             }
+        }
+    }
+
+    @Test
+    fun dashScopeRebuildsWordsAtPunctuationAndGapsWithoutSpeakers() {
+        val output = JSONObject("""{"text":"全文与单个sentence不同也保留时间戳","sentence":{"speaker_id":7,"words":[
+            {"text":"你","begin_time":100,"end_time":200},
+            {"text":"好","punctuation":"。","begin_time":250,"end_time":500},
+            {"text":"Yes!","punctuation":"!","begin_time":700,"end_time":900},
+            {"text":"先","punctuation":",","begin_time":1000,"end_time":1100},
+            {"text":"连","begin_time":1900,"end_time":2100},
+            {"text":"停；","begin_time":3001,"end_time":3300}
+        ]}}""")
+        val expected = listOf(
+            PhoneAsr.RawSeg(0.1, 0.5, "你好。"), PhoneAsr.RawSeg(0.7, 0.9, "Yes!"),
+            PhoneAsr.RawSeg(1.0, 2.1, "先,连"), PhoneAsr.RawSeg(3.001, 3.3, "停；"),
+        )
+        assertEquals(expected, PhoneAsr.dashScopeSegments(output, true))
+        val array = JSONObject().put("sentences", org.json.JSONArray()
+            .put(JSONObject().put("words", output.getJSONObject("sentence").getJSONArray("words"))))
+        assertEquals(expected, PhoneAsr.dashScopeSegments(array, false))
+        withTestServer({ HttpResp(body = JSONObject().put("output", output).toString()) }) { baseUrl ->
+            val result = PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, baseUrl, "k"), "test.opus", sampleOpus)
+            assertFalse(result.optBoolean("synthetic_segments"))
+            assertEquals(4, result.getJSONArray("segments").length())
+            assertEquals(3.001, result.getJSONArray("segments").getJSONObject(3).getDouble("start"), 1e-9)
+            assertEquals(output.getString("text"), result.getString("text"))
+        }
+    }
+
+    @Test
+    fun dashScopeReadTimeoutDoesNotRepeatBilledRequest() {
+        val calls = AtomicInteger(0)
+        withTestServer({
+            calls.incrementAndGet()
+            Thread.sleep(150)
+            HttpResp(body = """{"output":{"text":"慢响应"}}""")
+        }) { baseUrl ->
+            val error = assertThrows(PhoneAsrException::class.java) {
+                PhoneAsr.transcribe(AsrConfig(AsrProvider.DASHSCOPE, baseUrl, "k"), "test.opus", sampleOpus, timeoutMs = 40)
+            }
+            assertTrue(error.cause is SocketTimeoutException)
+            assertEquals(AsrFailureKind.READ_TIMEOUT, error.kind)
+            assertEquals(1, calls.get())
         }
     }
 
