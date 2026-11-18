@@ -136,25 +136,16 @@ object Speakers {
         id?.let { resolve(ctx, it)?.let { s -> s.name ?: s.defaultName } ?: it }
 
     internal fun selfIds(roster: Map<String, Speaker>): Set<String> {
-        val explicit = roster.values.filter {
+        return roster.values.filter {
             it.mergedInto == null && it.name?.trim()?.lowercase() in setOf("我", "本人", "自己", "me")
         }.map { it.id }.toSet()
-        if (explicit.isNotEmpty()) return explicit
-        val fallback = listOf("spk_001", "spk_01").firstOrNull {
-            roster[it]?.let { s -> s.mergedInto == null && s.name == null } == true
-        }
-        return if (fallback != null) setOf(fallback) else emptySet()
     }
 
-    /** 注册始终复用名册已有的「我」；空名册时只创建固定 self 身份。 */
+    /** 注册复用名册已有的「我」，首次注册创建固定 self 身份。 */
     @Synchronized
     internal fun selfIdentity(ctx: Context): String {
         val id = selfIds(all(ctx)).sorted().firstOrNull()
-        if (id != null) {
-            if (resolve(ctx, id)?.name == null) edit(ctx, id, name = "我")
-            return id
-        }
-        return namedIdentity(ctx, "我", preferredId = "self")
+        return id ?: namedIdentity(ctx, "我", preferredId = "self")
     }
 
     /** 只有用户/种子显式指定名字才建身份，不自动生成 pspk_ 人物。 */

@@ -97,7 +97,10 @@ internal object Voiceprint {
         bgScope.launch {
             try {
                 backgroundLock.withLock {
-                    if (bootstrapIfNeeded(app)) refreshUi()
+                    if (bootstrapIfNeeded(app)) {
+                        refreshUi()
+                        SceneAndMood.scheduleBackgroundScan(app)
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "声纹后台处理失败: ${e.message}")
@@ -484,9 +487,12 @@ internal object Voiceprint {
         // 先让人工指定立刻生效，即使原录音已过期，随后再后台重打分。
         Transcripts.computeAndCommit(ctx, name) { root -> applyAssignments(ctx, name, root, readCache(ctx, name).orEmpty()); true }
         refreshUi()
+        SceneAndMood.scheduleBackgroundScan(ctx)
         bgScope.launch {
             backgroundLock.withLock {
-                rescoreTranscripts(ctx, force = true, day = if (emb != null || removed) null else name.take(8))
+                if (rescoreTranscripts(ctx, force = true, day = if (emb != null || removed) null else name.take(8))) {
+                    SceneAndMood.scheduleBackgroundScan(ctx)
+                }
             }
         }
     }
@@ -545,10 +551,16 @@ internal object Voiceprint {
         var other = assigned.values.mapNotNull { it.removePrefix("other_").toIntOrNull() }.maxOrNull() ?: 0
         for (i in 0 until segments.length()) {
             val s = segments.getJSONObject(i)
-            s.remove("speaker")
-            s.put("speaker", assigned[i] ?: "other_${++other}")
+            val previousSpeaker = s.optString("speaker")
+            val speaker = assigned[i] ?: "other_${++other}"
+            val isProtected = Proximity.isProtectedSpeakerId(speaker, roster)
+            s.put("speaker", speaker)
             if (manual.containsKey(i)) s.put("vp_manual", manual.getValue(i)) else s.remove("vp_manual")
-            if (s.optString("proximity") == Proximity.MEDIA && Proximity.isProtectedSpeakerId(s.optString("speaker"), roster)) {
+            // 身份保护改变了连续段边界，仍有录音时需要重新计算整段。
+            if (previousSpeaker != speaker && isProtected != Proximity.isProtectedSpeakerId(previousSpeaker, roster)) {
+                SceneAndMood.invalidateAudioEnrichment(root)
+            }
+            if (s.optString("proximity") == Proximity.MEDIA && isProtected) {
                 s.put("proximity", Proximity.NEAR)
             }
         }

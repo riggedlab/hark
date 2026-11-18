@@ -100,14 +100,52 @@ class VoiceprintTest {
         val cache = listOf(Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)), Voiceprint.CachedSegment(2.0, 2.4, vector(170.0)))
         Voiceprint.writeCache(ctx, name, cache)
         for (engine in listOf("dashscope", "hark-http", "openai", "volcengine")) {
-            val root = transcript(name, engine = engine)
+            val root = transcript(name, speaker = "other_5", engine = engine)
+                .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
+            val segments = root.getJSONArray("segments")
+            for (i in 0 until segments.length()) segments.getJSONObject(i).put("proximity", Proximity.MEDIA)
             Voiceprint.enrichTranscript(ctx, File(ctx.filesDir, name), root)
             assertEquals(3, root.getInt("vp_ver"))
-            assertEquals("spk_001", root.getJSONArray("segments").getJSONObject(0).getString("speaker"))
-            assertEquals("other_1", root.getJSONArray("segments").getJSONObject(1).getString("speaker"))
+            assertEquals("spk_001", segments.getJSONObject(0).getString("speaker"))
+            assertEquals("other_1", segments.getJSONObject(1).getString("speaker"))
+            assertEquals(Proximity.NEAR, segments.getJSONObject(0).getString("proximity"))
+            assertEquals(Proximity.MEDIA, segments.getJSONObject(1).getString("proximity"))
+            assertFalse(root.has("sm_audio_ver"))
         }
         assertArrayEquals(vector(170.0), Voiceprint.readCache(ctx, name)!![1].embedding, 1e-6f)
         assertFalse(File(ctx.filesDir, "speakers_local.json").readText().contains("pspk_"))
+    }
+
+    @Test fun unnamedLegacyIdsDoNotBecomeTheWearer() {
+        File(ctx.filesDir, "speakers_mac.json").writeText(
+            JSONObject().put("items", JSONObject().put("spk_001", JSONObject()).put("spk_01", JSONObject())).toString(),
+        )
+        assertTrue(Speakers.selfIds(Speakers.all(ctx)).isEmpty())
+        assertEquals("self", Speakers.selfIdentity(ctx))
+        val roster = Speakers.all(ctx)
+        assertEquals(setOf("self"), Speakers.selfIds(roster))
+        assertFalse(Proximity.isProtectedSpeakerId("spk_001", roster))
+        assertFalse(Proximity.isProtectedSpeakerId("spk_01", roster))
+        assertTrue(Proximity.isProtectedSpeakerId("self", roster))
+    }
+
+    @Test fun markingTheWearerAsNotSelfInvalidatesMediaContext() = runBlocking {
+        val name = "20261113-115100.opus"
+        val me = Speakers.selfIdentity(ctx)
+        Voiceprint.addEnrollment(ctx, me, name, 0.0, 2.0, vector(0.0), "user")
+        Voiceprint.writeCache(ctx, name, listOf(Voiceprint.CachedSegment(0.0, 2.0, vector(0.0))))
+        val transcript = transcript(name, speaker = me)
+            .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+            .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
+            .put("sm_text_ver", 2)
+        Transcripts.save(ctx, transcript)
+
+        Voiceprint.labelSentence(ctx, name, 0.0, 2.0, Voiceprint.NOT_SELF)
+        val root = JSONObject(File(Transcripts.dir(ctx), "$name.json").readText())
+        val segment = root.getJSONArray("segments").getJSONObject(0)
+        assertEquals(Voiceprint.NOT_SELF, segment.getString("vp_manual"))
+        assertTrue(segment.getString("speaker").startsWith("other_"))
+        assertFalse(root.has("sm_audio_ver"))
     }
 
     @Test fun explicitLabelsPersistAndEnrollmentEditsReuseCache() = runBlocking {

@@ -125,9 +125,11 @@ class Uploader(private val ctx: Context) {
                 AppState.update { it.copy(localAsrRunning = f.name) }
                 var abortBatch = false
                 runCatching {
-                    val rawJson = PhoneAsr.transcribe(cfg, f.name, f.readBytes())
-                    val enriched = Voiceprint.enrichTranscript(ctx, f, rawJson)
-                    Transcripts.save(ctx, enriched)
+                    val opus = f.readBytes()
+                    val rawJson = PhoneAsr.transcribe(cfg, f.name, opus)
+                    val rejected = Transcripts.rejectRunawayAsr(rawJson, PhoneAsr.oggDurationSec(opus))
+                    val result = if (rejected) rawJson else Voiceprint.enrichTranscript(ctx, f, rawJson)
+                    Transcripts.save(ctx, result, alreadyRejected = rejected)
                     SceneAndMood.scheduleBackgroundScan(ctx)
                 }.onSuccess {
                 ok++

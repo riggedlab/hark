@@ -178,6 +178,8 @@ internal data class EventUi(
     val parasNewestFirst: List<ParaUi>,
     val fgParaCount: Int,
     val bgParaCount: Int,
+    val mediaBgParaCount: Int,
+    val isBackgroundMediaOnly: Boolean,
     val firstAudioLine: LineUi?,
     val copyText: String,
     val searchBlob: String,
@@ -588,10 +590,6 @@ class MainActivity : ComponentActivity() {
         return cur
     }
 
-    private fun detectSelfSpeakerIds(roster: Map<String, Speaker>): Set<String> {
-        return Speakers.selfIds(roster)
-    }
-
     /**
      * 仅加载最新 chunkBudget 条（若全是静音则自动多扫一段确保首屏有内容），
      * 绝不在冷启动时全量解析几百条历史转写与 Ogg 文件头。
@@ -604,7 +602,7 @@ class MainActivity : ComponentActivity() {
         val stubsDesc = Recordings.listStubsNewestFirst(this) // 严格从近到远（最新在前）
         val marks = uploader.snapshotMarks()
         val roster = Speakers.all(this)
-        val selfIds = detectSelfSpeakerIds(roster)
+        val selfIds = Speakers.selfIds(roster)
 
         val selectedStubsDesc = ArrayList<RecordingStub>(minOf(stubsDesc.size, chunkBudget + 32))
         var spokenFound = 0
@@ -708,12 +706,12 @@ class MainActivity : ComponentActivity() {
 
             val paraUisAsc = paras.mapIndexed { idx, pLines ->
                 val (who, spkId, _) = paraMeta[idx]
-                val isSelf = (spkId != null && spkId in selfIds) || isSelfDisplayName(who)
+                val isSelf = spkId in selfIds
                 val joined = pLines.joinToString("") { it.seg.text.trim() }
                 val avgDb = computeEnergyWeightedDb(pLines)
                 val prox = computeDominantProximity(pLines)
-                val protectedSpk = isSelf || Proximity.isProtectedSpeakerId(spkId, roster)
-                val isBg = (prox == Proximity.FAR || prox == Proximity.MEDIA) && !protectedSpk
+                val protectedSpk = Proximity.isProtectedSpeakerId(spkId, roster)
+                val isBg = Proximity.isBackground(prox) && !protectedSpk
                 val moodPair = computeWeightedMood(pLines)
                 val vTags = pLines.mapNotNull { it.seg.vocalTag }.distinct().take(2)
                 val vCue = humanVoiceCue(prox, avgDb)
@@ -744,6 +742,8 @@ class MainActivity : ComponentActivity() {
             }
 
             val fgParasAsc = paraUisAsc.filter { !it.isBackgroundNoise }
+            val mediaBgParaCount = paraUisAsc.count { it.isBackgroundNoise && it.proximity == Proximity.MEDIA }
+            val isBackgroundMediaOnly = fgParasAsc.isEmpty() && mediaBgParaCount > 0
             val mainParasAsc = fgParasAsc.ifEmpty { paraUisAsc }
             val mainLines = mainParasAsc.flatMap { it.lines }
             val start = g.first().at
@@ -768,10 +768,11 @@ class MainActivity : ComponentActivity() {
 
             val peopleList = mainParasAsc.mapNotNull { it.who }.distinct()
             val peopleText = peopleList.joinToString("、")
-            val nonSelfPeople = peopleList.filterNot { isSelfDisplayName(it) }
+            val nonSelfPeople = mainParasAsc.filterNot { it.isSelf }.mapNotNull { it.who }.distinct()
             val totalChars = mainParasAsc.sumOf { it.text.length }
-            val isCompactNote = mainParasAsc.size <= 1 && totalChars <= 88
+            val isCompactNote = !isBackgroundMediaOnly && mainParasAsc.size <= 1 && totalChars <= 88
             val headline = when {
+                isBackgroundMediaOnly -> "外放背景声"
                 nonSelfPeople.size == 1 -> "与 ${nonSelfPeople[0]} 的对话"
                 nonSelfPeople.size == 2 -> "与 ${nonSelfPeople[0]}、${nonSelfPeople[1]} 的对话"
                 nonSelfPeople.size > 2 -> "与 ${nonSelfPeople[0]}、${nonSelfPeople[1]} 等 ${nonSelfPeople.size} 人对话"
@@ -837,6 +838,8 @@ class MainActivity : ComponentActivity() {
                 parasNewestFirst = paraUisAsc.asReversed(),
                 fgParaCount = fgParasAsc.size,
                 bgParaCount = paraUisAsc.size - fgParasAsc.size,
+                mediaBgParaCount = mediaBgParaCount,
+                isBackgroundMediaOnly = isBackgroundMediaOnly,
                 firstAudioLine = g.lastOrNull { it.rec.hasAudio } ?: g.firstOrNull { it.rec.hasAudio },
                 copyText = copyText,
                 searchBlob = searchBlob,
@@ -972,7 +975,7 @@ class MainActivity : ComponentActivity() {
     private fun buildPeopleSnapshot(): Pair<List<PersonCardUi>, Int> {
         val roster = Speakers.all(this)
         if (roster.isEmpty()) return emptyList<PersonCardUi>() to 0
-        val selfIds = detectSelfSpeakerIds(roster)
+        val selfIds = Speakers.selfIds(roster)
         val stubsDesc = Recordings.listStubsNewestFirst(this)
         val spkCount = HashMap<String, Int>()
         val spkClip = HashMap<String, Pair<Recording, Segment>>()
@@ -2362,7 +2365,7 @@ private fun DialogueStreamView(
                             }
                             val bgOpen = expandedBgKeys[ev.key] == true || queryHitsBg
                             val visibleParas = ev.parasNewestFirst.filter { p ->
-                                val bgAllow = !p.isBackgroundNoise || bgOpen || ev.fgParaCount == 0
+                                val bgAllow = !p.isBackgroundNoise || bgOpen || (ev.fgParaCount == 0 && !ev.isBackgroundMediaOnly)
                                 val selfAllow = activeLens != "self" || p.isSelf
                                 bgAllow && selfAllow
                             }
@@ -2381,10 +2384,9 @@ private fun DialogueStreamView(
                                 add(FlatDialogueRow.Bubble(p))
                             }
                             if (ev.bgParaCount > 0 && !queryHitsBg && activeLens != "self") {
-                                val mediaCnt = ev.parasNewestFirst.count { it.isBackgroundNoise && it.proximity == Proximity.MEDIA }
                                 val kind = when {
-                                    mediaCnt == ev.bgParaCount -> "外放背景声"
-                                    mediaCnt > 0 -> "邻桌与外放声"
+                                    ev.mediaBgParaCount == ev.bgParaCount -> "外放背景声"
+                                    ev.mediaBgParaCount > 0 -> "邻桌与外放声"
                                     else -> "邻桌远场声"
                                 }
                                 add(FlatDialogueRow.FoldToggle(ev.key, ev.bgParaCount, kind, bgOpen))
@@ -2944,7 +2946,7 @@ private fun EditorialStreamView(
                                 val queryHitsBg = q.isNotBlank() && ev.parasNewestFirst.any {
                                     it.isBackgroundNoise && it.textLower.contains(q)
                                 }
-                                val bgShown = showBgEvents[ev.key] == true || queryHitsBg
+                                val bgShown = showBgEvents[ev.key] == true || queryHitsBg || ev.isBackgroundMediaOnly
                                 val turns = if (bgShown || ev.bgParaCount == 0) {
                                     ev.parasNewestFirst
                                 } else {
@@ -2956,7 +2958,7 @@ private fun EditorialStreamView(
                                 add(
                                     FlatEditorialRow.ExpandedFooter(
                                         eventKey = ev.key,
-                                        bgCount = if (queryHitsBg) 0 else ev.bgParaCount,
+                                        bgCount = if (queryHitsBg || ev.isBackgroundMediaOnly) 0 else ev.bgParaCount,
                                         bgShown = bgShown,
                                         canCollapse = !forceExpand,
                                         drawLine = hasNextNode,
@@ -3308,17 +3310,19 @@ private fun EditorialConversationHead(
             )
 
             if (!isOpen) {
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = "「${ev.previewQuote}」",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (!ev.isBackgroundMediaOnly) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        text = "「${ev.previewQuote}」",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    text = buildString {
+                    text = if (ev.isBackgroundMediaOnly) "展开 ${ev.bgParaCount} 段背景声" else buildString {
                         append("展开全篇 ${ev.fgParaCount} 段")
                         if (ev.bgParaCount > 0) append(" · 已静默 ${ev.bgParaCount} 段背景声")
                     },
@@ -4514,11 +4518,6 @@ private fun highlightMatches(text: String, query: String): AnnotatedString {
     return remember(text, query, deck.signalRedContainer, deck.onSignalRedContainer) {
         buildHighlightedText(text, query, deck.signalRedContainer, deck.onSignalRedContainer)
     }
-}
-
-private fun isSelfDisplayName(name: String?): Boolean {
-    val clean = name?.trim()?.lowercase() ?: return false
-    return clean == "我" || clean == "本人" || clean == "自己" || clean == "me"
 }
 
 private fun humanVoiceCue(proximity: String?, avgDb: Float?): String? = when (proximity) {

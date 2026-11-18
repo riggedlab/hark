@@ -5,11 +5,14 @@ import androidx.test.core.app.ApplicationProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.io.File
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -79,7 +82,11 @@ class SceneAndMoodTest {
     fun enrichWithPcmPersistsSceneTagsAndPerSegmentMoodRoundTrip() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         val name = "20261113-130000.opus"
-        val pcm = FloatArray(16000 * 4) { i -> (0.08 * sin(2.0 * PI * 300.0 * i / 16000.0)).toFloat() }
+        val pcm = FloatArray(16000 * 4) { i ->
+            val t = i / 16000.0
+            val amplitude = if (t in 0.3..1.4 || t in 2.3..3.6) 0.08 else 0.0008
+            (amplitude * sin(2.0 * PI * 300.0 * t)).toFloat()
+        }
         val root = JSONObject()
             .put("name", name)
             .put("duration_s", 4.0)
@@ -115,6 +122,75 @@ class SceneAndMoodTest {
         val tags = SceneAndMood.getSceneTags(ctx, noAsrName)
         assertEquals(2, tags.size)
         assertEquals("敲键盘", tags[0].label)
+    }
+
+    @Test
+    fun retiredLabelsAreHiddenInBothTypesOfHistoricalData() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val retired = setOf("宠物叫声", "鸟鸣")
+        assertTrue(SceneAndMood.SCENE_RULES.none { it.label in retired })
+        val tags = JSONArray()
+        for (label in retired + "敲键盘") tags.put(JSONObject().put("label", label).put("score", 0.84))
+        val root = JSONObject().put("ver", 1).put("scene_tags", tags)
+
+        val sidecarName = "20261113-130600.opus"
+        File(SceneAndMood.sceneDir(ctx), "$sidecarName.json").writeText(root.toString())
+        repeat(2) {
+            assertEquals(listOf("敲键盘"), SceneAndMood.getSceneTags(ctx, sidecarName).map { it.label })
+        }
+
+        val transcriptName = "20261113-130700.opus"
+        Transcripts.save(ctx, root.put("name", transcriptName))
+        assertEquals(listOf("敲键盘"), SceneAndMood.getSceneTags(ctx, transcriptName).map { it.label })
+    }
+
+    @Test
+    fun backgroundTurnsHaveNoMoodDuringEnrichmentOrOnLegacyRead() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val segments = JSONArray()
+        for (label in listOf(Proximity.MEDIA, Proximity.FAR, Proximity.NEAR)) {
+            segments.put(
+                JSONObject().put("start", 0.0).put("end", 1.0).put("text", "太好了！")
+                    .put("proximity", label).put("mood", "positive").put("mood_score", 0.9)
+                    .put("vocal_tag", "笑声"),
+            )
+        }
+        val name = "20261113-130800.opus"
+        val root = JSONObject().put("name", name).put("segments", segments)
+        Transcripts.save(ctx, root)
+        val parsed = requireNotNull(Transcripts.get(ctx, name)).segments
+        for (segment in parsed.take(2)) {
+            assertNull(segment.mood)
+            assertNull(segment.moodScore)
+            assertNull(segment.vocalTag)
+        }
+        assertEquals("positive", parsed.last().mood)
+
+        SceneAndMood.enrichTextOnly(ctx, root)
+        for (i in 0..1) {
+            val segment = segments.getJSONObject(i)
+            for (key in listOf("mood", "mood_score", "vocal_tag")) assertFalse(segment.has(key))
+        }
+        assertTrue(segments.getJSONObject(2).has("mood_score"))
+    }
+
+    @Test
+    fun acousticMediaLabelSkipsPerSentenceMood() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val pcm = FloatArray(16000 * 3) { i ->
+            (0.01 * sin(2.0 * PI * 2100.0 * i / 16000.0)).toFloat()
+        }
+        val segment = JSONObject().put("text", "太好了！").put("start", 0.5).put("end", 2.5)
+            .put("mood", "positive").put("mood_score", 0.9)
+        val root = JSONObject().put("segments", JSONArray().put(segment))
+        SceneAndMood.enrichWithPcm(ctx, pcm, root)
+        assertEquals(Proximity.MEDIA, segment.optString("proximity"))
+        assertFalse(segment.has("mood"))
+        assertFalse(segment.has("mood_score"))
+
+        segment.put("speaker", Speakers.selfIdentity(ctx))
+        SceneAndMood.enrichWithPcm(ctx, pcm, root)
+        assertTrue(segment.optString("proximity") in listOf(Proximity.NEAR, Proximity.FAR))
     }
 
     @Test

@@ -77,7 +77,7 @@ class UiWalkthroughTest {
             JSONObject()
                 .put("name", rec1)
                 .put("vp_ver", Voiceprint.SCHEMA_VERSION)
-                .put("sm_audio_ver", SceneAndMood.SCHEMA_VERSION)
+                .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
                 .put("duration_s", 298.0)
                 .put("text", "所以感觉还是要先把插件接口收敛干净。好的没问题，周五下午三点过一遍硬件打样结构。")
                 .put(
@@ -99,7 +99,7 @@ class UiWalkthroughTest {
             JSONObject()
                 .put("name", rec2)
                 .put("vp_ver", Voiceprint.SCHEMA_VERSION)
-                .put("sm_audio_ver", SceneAndMood.SCHEMA_VERSION)
+                .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
                 .put("duration_s", 185.0)
                 .put("text", "备忘一下今晚跑通本地 hark timeline 查询。")
                 .put(
@@ -160,6 +160,33 @@ class UiWalkthroughTest {
             }
         }
         FileOutputStream(File(outDir, "$name.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    @Test
+    fun mediaOnlyEventStaysFoldedUntilOpenedInBothFeedStyles() {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val sentence = "这句来自手机外放。"
+        val segment = JSONObject().put("start", 0.0).put("end", 1.5).put("text", sentence)
+            .put("proximity", Proximity.MEDIA).put("mood", "positive").put("mood_score", 0.9)
+        Transcripts.save(
+            ctx,
+            JSONObject().put("name", "20261112-170000.opus").put("text", sentence)
+                .put("duration_s", 2).put("segments", JSONArray().put(segment)),
+        )
+        AppState.update { it.copy(textVersion = it.textVersion + 1) }
+
+        val toggle = "已静默 1 段外放背景声 · 展开"
+        rule.waitUntil(5_000) { rule.onAllNodesWithText(toggle).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText(sentence).assertDoesNotExist()
+        rule.onNodeWithText(toggle).performClick()
+        rule.onNodeWithText(sentence).assertIsDisplayed()
+
+        rule.runOnUiThread { Config.setFeedStyle(ctx, FeedStyle.EDITORIAL) }
+        val editorialToggle = "展开 1 段背景声"
+        rule.waitUntil(5_000) { rule.onAllNodesWithText(editorialToggle).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText(sentence).assertDoesNotExist()
+        rule.onNodeWithText(editorialToggle).performClick()
+        rule.onNodeWithText(sentence).assertIsDisplayed()
     }
 
     @Test
