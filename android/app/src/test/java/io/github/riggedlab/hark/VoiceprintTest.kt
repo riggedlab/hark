@@ -16,6 +16,7 @@ import org.robolectric.RobolectricTestRunner
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.file.Files
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -93,6 +94,15 @@ class VoiceprintTest {
         assertEquals("other_1", Voiceprint.assignSpeakers(listOf(utterances[0].copy(db = -80f)), centroids)[0])
     }
 
+    @Test fun groupThatResemblesSpeakerCarriesSentencesBelowSentenceThreshold() {
+        // 两句长句同组；第二句单独打分不过 0.65，但组向量与本人质心足够近。
+        val utterances = listOf(Voiceprint.Utterance(0, 2.0, vector(0.0), -35f), Voiceprint.Utterance(1, 2.0, vector(60.0), -50f))
+        val centroids = mapOf("me" to vector(0.0))
+        assertEquals(listOf("me", "me"), Voiceprint.assignSpeakers(utterances, centroids).let { listOf(it[0], it[1]) })
+        assertEquals("other_1", Voiceprint.assignSpeakers(utterances, centroids, mapOf(1 to Voiceprint.NOT_SELF), setOf("me"))[1])
+        assertEquals("other_1", Voiceprint.assignSpeakers(utterances, mapOf("me" to vector(90.0)))[1])
+    }
+
     @Test fun cacheIgnoresAsrSpeakersAndWorksWithoutOriginalAudio() {
         Speakers.namedIdentity(ctx, "我", "spk_001")
         Voiceprint.addEnrollment(ctx, "spk_001", "seed.opus", 0.0, 2.0, vector(0.0), "seed")
@@ -105,7 +115,7 @@ class VoiceprintTest {
             val segments = root.getJSONArray("segments")
             for (i in 0 until segments.length()) segments.getJSONObject(i).put("proximity", Proximity.MEDIA)
             Voiceprint.enrichTranscript(ctx, File(ctx.filesDir, name), root)
-            assertEquals(3, root.getInt("vp_ver"))
+            assertEquals(Voiceprint.ASSIGN_VERSION, root.getInt("vp_ver"))
             assertEquals("spk_001", segments.getJSONObject(0).getString("speaker"))
             assertEquals("other_1", segments.getJSONObject(1).getString("speaker"))
             assertEquals(Proximity.NEAR, segments.getJSONObject(0).getString("proximity"))
@@ -135,7 +145,7 @@ class VoiceprintTest {
         Voiceprint.addEnrollment(ctx, me, name, 0.0, 2.0, vector(0.0), "user")
         Voiceprint.writeCache(ctx, name, listOf(Voiceprint.CachedSegment(0.0, 2.0, vector(0.0))))
         val transcript = transcript(name, speaker = me)
-            .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+            .put("vp_ver", Voiceprint.ASSIGN_VERSION)
             .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
             .put("sm_text_ver", 2)
         Transcripts.save(ctx, transcript)
@@ -155,7 +165,7 @@ class VoiceprintTest {
         Transcripts.save(ctx, transcript(name))
         Voiceprint.writeCache(ctx, name, listOf(Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)), Voiceprint.CachedSegment(2.0, 2.4, vector(20.0))))
         val otherDate = "20261112-115000.opus"
-        Transcripts.save(ctx, transcript(otherDate).put("vp_ver", 3))
+        Transcripts.save(ctx, transcript(otherDate).put("vp_ver", Voiceprint.ASSIGN_VERSION))
         Voiceprint.writeCache(ctx, otherDate, Voiceprint.readCache(ctx, name)!!)
         val cache = File(ctx.filesDir, "vp_cache/$name.bin")
         val before = cache.readBytes()
@@ -183,12 +193,58 @@ class VoiceprintTest {
         assertEquals(1, Voiceprint.readCache(ctx, name)!!.size)
     }
 
+    @Test fun scanSkipsCurrentTranscriptUntilForcedOrReplaced() {
+        val name = "20261113-115601.opus"
+        val root = JSONObject().put("name", name).put("vp_ver", Voiceprint.ASSIGN_VERSION)
+        Transcripts.save(ctx, root)
+        val file = File(Transcripts.dir(ctx), "$name.json")
+        var parsed = 0
+        fun scan(force: Boolean = false) = Voiceprint.rescoreTranscripts(ctx, force) { parsed++ }
+
+        assertFalse(scan())
+        assertFalse(scan())
+        assertEquals(1, parsed)
+        assertTrue(scan(force = true))
+        assertFalse(scan())
+        assertEquals(2, parsed)
+
+        val modified = Files.getLastModifiedTime(file.toPath())
+        val length = file.length()
+        val older = JSONObject(file.readText()).put("vp_ver", Voiceprint.ASSIGN_VERSION - 1)
+        Sync.writeFile(file, older.toString())
+        Files.setLastModifiedTime(file.toPath(), modified)
+        assertEquals(length, file.length())
+        assertTrue(scan())
+        assertEquals(Voiceprint.ASSIGN_VERSION, JSONObject(file.readText()).getInt("vp_ver"))
+        assertFalse(scan())
+        assertEquals(3, parsed)
+    }
+
+    @Test fun scanRetriesHistoricalTranscriptWhenEmbeddingsArrive() {
+        val name = "20261113-115602.opus"
+        Transcripts.save(ctx, transcript(name))
+        var parsed = 0
+        fun scan() = Voiceprint.rescoreTranscripts(ctx, force = false) { parsed++ }
+
+        assertFalse(scan())
+        assertFalse(scan())
+        assertEquals(1, parsed)
+
+        Voiceprint.writeCache(ctx, name, listOf(
+            Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)),
+            Voiceprint.CachedSegment(2.0, 2.4, null),
+        ))
+        assertTrue(scan())
+        assertFalse(scan())
+        assertEquals(2, parsed)
+    }
+
     @Test fun seedImportUsesNamesDeduplicatesAndRescoresVersionThreeTranscripts() {
         val name = "20261113-121000.opus"
         val friend = Speakers.namedIdentity(ctx, "朋友")
         val me = Speakers.selfIdentity(ctx)
         Voiceprint.writeCache(ctx, name, listOf(Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)), Voiceprint.CachedSegment(2.0, 2.4, vector(170.0))))
-        val tr = transcript(name).put("vp_ver", 3)
+        val tr = transcript(name).put("vp_ver", Voiceprint.ASSIGN_VERSION)
         Transcripts.save(ctx, tr)
         val seed = JSONObject().put("self", JSONArray().put(JSONObject().put("file", name).put("start", 0).put("end", 2)))
             .put("朋友", JSONArray().put(JSONObject().put("file", name).put("start", 2).put("end", 2.4)))
@@ -216,7 +272,7 @@ class VoiceprintTest {
             Voiceprint.CachedSegment(0.0, 2.0, vector(0.0)),
             Voiceprint.CachedSegment(2.0, 2.4, null),
         ))
-        Transcripts.save(ctx, transcript(name).put("vp_ver", Voiceprint.SCHEMA_VERSION))
+        Transcripts.save(ctx, transcript(name).put("vp_ver", Voiceprint.ASSIGN_VERSION))
         val seed = File(ctx.filesDir, "voice_seed.json").apply {
             writeText(JSONObject().put("self", JSONArray(listOf(name, expired).map {
                 JSONObject().put("file", it).put("start", 0).put("end", 2)
@@ -303,7 +359,7 @@ class VoiceprintTest {
     @Test fun syntheticWholeFileSegmentsSkipVoiceprints() {
         val root = PhoneAsr.buildTranscriptJson("20261113-123000.opus", 42.0, "整段文本", "openai", "model", emptyList())
         Voiceprint.enrichTranscript(ctx, File(ctx.filesDir, root.getString("name")), root)
-        assertEquals(3, root.getInt("vp_ver"))
+        assertEquals(Voiceprint.ASSIGN_VERSION, root.getInt("vp_ver"))
         assertFalse(root.getJSONArray("segments").getJSONObject(0).has("speaker"))
     }
 

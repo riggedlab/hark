@@ -371,17 +371,41 @@ internal class StreamingVad(context: Context) : AutoCloseable {
         env.createSession(context.assets.open("silero_vad.onnx").use { it.readBytes() }, options)
     }
     private val sr = OnnxTensor.createTensor(env, LongBuffer.wrap(longArrayOf(16000)), longArrayOf())
-    private val input = FloatArray(64 + 512)
-    private var state = FloatArray(256)
+    private val input = FloatArray(CONTEXT_SAMPLES + FRAME_SAMPLES)
+    private val state = FloatArray(256)
     private var count = 0
+    private var squares = 0.0
+    private var quietFrames = 0
 
-    fun reset() { input.fill(0f); state.fill(0f); count = 0 }
+    private fun resetModel() {
+        input.fill(0f, 0, CONTEXT_SAMPLES)
+        state.fill(0f)
+    }
+
+    fun reset() {
+        resetModel()
+        count = 0
+        squares = 0.0
+        quietFrames = 0
+    }
 
     fun accept(value: Float): Boolean {
-        input[64 + count++] = value
-        if (count < 512) return false
+        input[CONTEXT_SAMPLES + count++] = value
+        squares += value * value
+        if (count < FRAME_SAMPLES) return false
+        val quiet = squares < FRAME_SAMPLES * MIN_RMS * MIN_RMS
         count = 0
-        val speech = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, 576)).use { inp ->
+        squares = 0.0
+        if (quiet) {
+            if (quietFrames < RESET_AFTER_QUIET_FRAMES) {
+                quietFrames++
+                if (quietFrames == RESET_AFTER_QUIET_FRAMES) resetModel()
+                else rememberContext()
+            }
+            return false
+        }
+        quietFrames = 0
+        val speech = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, input.size.toLong())).use { inp ->
             OnnxTensor.createTensor(env, FloatBuffer.wrap(state), longArrayOf(2, 1, 128)).use { st ->
                 session.run(mapOf("input" to inp, "state" to st, "sr" to sr)).use { out ->
                     @Suppress("UNCHECKED_CAST")
@@ -393,9 +417,21 @@ internal class StreamingVad(context: Context) : AutoCloseable {
                 }
             }
         }
-        input.copyInto(input, 0, 512, 576)
+        rememberContext()
         return speech
     }
 
+    private fun rememberContext() {
+        input.copyInto(input, 0, FRAME_SAMPLES, input.size)
+    }
+
     override fun close() { sr.close(); session.close() }
+
+    private companion object {
+        const val FRAME_SAMPLES = 512
+        const val CONTEXT_SAMPLES = 64
+        // 2026-11-19 小米手机 chunks + 转写时间窗，按原 Silero 语音帧离线校准（-65 dBFS）。
+        const val MIN_RMS = 0.0005623413
+        const val RESET_AFTER_QUIET_FRAMES = 32 // 约 1 秒，保留句内低能量间隙的状态。
+    }
 }

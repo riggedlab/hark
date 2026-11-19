@@ -6,7 +6,6 @@ import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.pm.ServiceInfo
-import android.os.PowerManager
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.*
 import org.junit.Before
@@ -18,8 +17,10 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
+import org.robolectric.shadows.ShadowPowerManager
 import org.robolectric.shadows.ShadowService
 import org.robolectric.util.ReflectionHelpers
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
@@ -81,16 +82,27 @@ class RecorderPermissionFailureTest {
         val dir = RecorderService.chunkDir(service).apply { mkdirs() }
         val chunks = ChunkRecorder(dir)
         val io = ReflectionHelpers.getField<ScheduledExecutorService>(service, "io")
-        val lock = service.getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "test:recorder").apply { acquire() }
+        val allowClose = CountDownLatch(1)
         ReflectionHelpers.setField(service, "chunks", chunks)
-        ReflectionHelpers.setField(service, "wakeLock", lock)
         ReflectionHelpers.setField(service, "started", true)
-        io.execute { chunks.onPacket(0, byteArrayOf(0x48, 1, 2, 3)) }
+        io.execute {
+            chunks.onPacket(0, byteArrayOf(0x48, 1, 2, 3))
+            allowClose.await()
+        }
         try {
             assertEquals(Service.START_NOT_STICKY, service.onStartCommand(null, 0, 1))
-        } finally { controller.destroy() }
+        } finally {
+            controller.destroy()
+            try {
+                assertTrue(ShadowPowerManager.getLatestWakeLock().isHeld)
+            } finally {
+                allowClose.countDown()
+            }
+        }
+        val lock = ShadowPowerManager.getLatestWakeLock()
         assertTrue(io.awaitTermination(5, TimeUnit.SECONDS))
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (lock.isHeld && System.nanoTime() < deadline) Thread.sleep(5)
         assertFalse(lock.isHeld)
         assertFalse(dir.listFiles()!!.any { it.name.endsWith(".part") })
         assertTrue(dir.listFiles()!!.any { it.name.endsWith(".opus") })

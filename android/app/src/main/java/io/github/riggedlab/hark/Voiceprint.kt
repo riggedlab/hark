@@ -33,11 +33,15 @@ internal object Voiceprint {
     const val MODEL_ID = "campplus_zh_en_adv_16k"
     const val EMBED_DIM = 192
     const val SCHEMA_VERSION = 3
+    /** 转写里 vp_ver 的版本：归属规则变了就加一，让已有记录按新规则重认；向量缓存仍跟 SCHEMA_VERSION。 */
+    const val ASSIGN_VERSION = 4
     const val SELF = "__self__"
     const val NOT_SELF = "__not_self__"
 
     // 2026-11-13 用户标注 391 条校准；与 tools/voiceprint/identify_me.py 的聚类规则一致，参数以任务说明为准。
     internal const val MATCH_THRESHOLD = 0.65f
+    // 2026-11-19 手机 274 段实测：本人所在组与本人质心 0.65～0.88，他人组最高 0.46。
+    internal const val GROUP_MATCH_THRESHOLD = 0.6f
     internal const val CLUSTER_DISTANCE = 0.6f
     internal const val LONG_SENTENCE_S = 0.8
     private const val MIN_SENTENCE_S = 0.3
@@ -58,11 +62,19 @@ internal object Voiceprint {
     private val scanRunning = AtomicBoolean(false)
     private val cacheLock = Any()
 
+    private data class AssignmentCheck(
+        val transcript: ScanFileStamp,
+        val awaitingAudioOrCache: Boolean = false,
+        val embeddings: ScanFileStamp? = null,
+    )
+    // 生产调用由 backgroundLock 串行执行。只存本进程当前 ASSIGN_VERSION 的检查结果。
+    private val assignmentChecks = mutableMapOf<File, AssignmentCheck>()
+
     private fun localFile(ctx: Context) = File(ctx.filesDir, "speakers_local.json")
     private fun enrollFile(ctx: Context) = File(ctx.filesDir, "voice_enroll.json")
     private fun labelsFile(ctx: Context) = File(ctx.filesDir, "voice_labels.json")
     private fun cacheFile(ctx: Context, name: String) =
-        File(File(ctx.filesDir, "vp_cache").apply { mkdirs() }, "$name.bin")
+        File(File(ctx.filesDir, "vp_cache"), "$name.bin")
 
     private fun session(ctx: Context): OrtSession = session ?: synchronized(this) {
         session ?: OrtSession.SessionOptions().use { opts ->
@@ -114,20 +126,60 @@ internal object Voiceprint {
 
     fun bootstrapIfNeeded(ctx: Context): Boolean {
         var changed = migrateSchemaFast(ctx)
+        if (changed) assignmentChecks.clear()
         val imported = importSeeds(ctx)
         changed = rescoreTranscripts(ctx, force = imported) || changed
         return changed
     }
 
     /** 注册改变了全局质心，所以所有留有声纹缓存的日期均受影响；非我标注只影响当天。 */
-    private fun rescoreTranscripts(ctx: Context, force: Boolean, day: String? = null): Boolean {
+    internal fun rescoreTranscripts(
+        ctx: Context,
+        force: Boolean,
+        day: String? = null,
+        onParsed: (() -> Unit)? = null,
+    ): Boolean {
         var changed = false
-        for (name in Transcripts.allNames(ctx).sortedDescending()) {
+        val trDir = Transcripts.dir(ctx)
+        val chunkDir = RecorderService.chunkDir(ctx)
+        val names = Transcripts.allNames(ctx).toSet()
+        assignmentChecks.keys.removeAll { it.parentFile != trDir || it.name.removeSuffix(".json") !in names }
+        for (name in names.sortedDescending()) {
             if (day != null && !name.startsWith(day)) continue
+            val file = File(trDir, "$name.json")
+            val stamp = file.scanStamp()
+            val opus = File(chunkDir, name)
+            val cached = assignmentChecks[file]
+            fun embeddingStamp() = cacheFile(ctx, name).takeIf { it.exists() }?.scanStamp()
+            if (!force && cached != null && cached.transcript == stamp &&
+                (!cached.awaitingAudioOrCache || (!opus.exists() && cached.embeddings == embeddingStamp()))
+            ) continue
+            assignmentChecks.remove(file)
             try {
-                val updated = Transcripts.computeAndCommit(ctx, name) { root ->
-                    if (!force && root.optInt("vp_ver", 0) >= SCHEMA_VERSION) false
-                    else doEnrich(ctx, File(RecorderService.chunkDir(ctx), name), root, preserveHistory = true)
+                var checked: AssignmentCheck? = null
+                val updated = Transcripts.computeAndCommit(ctx, name, onCommitted = { committed, _ ->
+                    committed.scanStamp()?.let { assignmentChecks[committed] = AssignmentCheck(it) }
+                }) { root ->
+                    onParsed?.invoke()
+                    checked = null
+                    if (!force && root.optInt("vp_ver", 0) >= ASSIGN_VERSION) {
+                        checked = stamp?.let { AssignmentCheck(it) }
+                        return@computeAndCommit false
+                    }
+                    val missingAudio = !opus.exists()
+                    val embeddings = if (missingAudio) embeddingStamp() else null
+                    val enriched = doEnrich(ctx, opus, root, preserveHistory = true)
+                    if (stamp != null) {
+                        checked = when {
+                            enriched -> AssignmentCheck(stamp)
+                            missingAudio -> AssignmentCheck(stamp, awaitingAudioOrCache = true, embeddings = embeddings)
+                            else -> null
+                        }
+                    }
+                    enriched
+                }
+                if (!updated && checked != null && stamp == file.scanStamp()) {
+                    assignmentChecks[file] = checkNotNull(checked)
                 }
                 if (updated) {
                     changed = true
@@ -314,6 +366,10 @@ internal object Voiceprint {
         var otherIndex = 0
         for (group in groupUtterances(utterances)) {
             var otherId: String? = null
+            // 逐句分数会被组内短句、远场拉低；至少两句长句的组整体像某人时，未过逐句门槛的句子跟随该组。
+            val groupId = if (group.members.count { byIndex.getValue(it).duration >= LONG_SENTENCE_S } < 2) null
+            else centroids.entries.maxByOrNull { cosine(group.embedding, it.value) }
+                ?.takeIf { cosine(group.embedding, it.value) >= GROUP_MATCH_THRESHOLD }?.key
             for (index in group.members) {
                 val override = manual[index]
                 if (override != null && override != NOT_SELF) {
@@ -325,8 +381,10 @@ internal object Voiceprint {
                     .filter { override != NOT_SELF || it.key !in selfIds }
                     .map { it.key to identityScore(u, group.embedding, it.value) }
                     .maxByOrNull { it.second }
-                assigned[index] = if (best != null && best.second >= MATCH_THRESHOLD) best.first else {
-                    otherId ?: "other_${++otherIndex}".also { otherId = it }
+                assigned[index] = when {
+                    best != null && best.second >= MATCH_THRESHOLD -> best.first
+                    groupId != null && !(override == NOT_SELF && groupId in selfIds) -> groupId
+                    else -> otherId ?: "other_${++otherIndex}".also { otherId = it }
                 }
             }
         }
@@ -352,6 +410,7 @@ internal object Voiceprint {
 
     internal fun writeCache(ctx: Context, name: String, entries: List<CachedSegment>) = synchronized(cacheLock) {
         val file = cacheFile(ctx, name)
+        file.parentFile?.mkdirs()
         val tmp = File(file.parentFile, ".${file.name}.tmp")
         DataOutputStream(tmp.outputStream().buffered()).use { output ->
             output.writeInt(SCHEMA_VERSION)
@@ -591,12 +650,12 @@ internal object Voiceprint {
     private fun doEnrich(ctx: Context, opusFile: File, root: JSONObject, preserveHistory: Boolean = false): Boolean {
         val segments = root.optJSONArray("segments")
         if (segments == null || segments.length() == 0 || root.optBoolean("synthetic_segments", false)) {
-            root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION)
+            root.put("vp_done", true).put("vp_ver", ASSIGN_VERSION)
             return true
         }
         val cache = cachedSegments(ctx, opusFile, segments) ?: return false
         applyAssignments(ctx, opusFile.name, root, cache, preserveHistory)
-        root.put("vp_done", true).put("vp_ver", SCHEMA_VERSION).remove("vp_legacy_checked")
+        root.put("vp_done", true).put("vp_ver", ASSIGN_VERSION).remove("vp_legacy_checked")
         return true
     }
 

@@ -66,6 +66,11 @@ internal object SceneAndMood {
     private val workerRunning = AtomicBoolean(false)
     private val rescanPending = AtomicBoolean(false)
     private val sceneMem = ConcurrentHashMap<String, List<SceneTag>>()
+    private data class ScanResult<T>(val stamp: ScanFileStamp, val result: T)
+    private data class TranscriptChecks(val needsAudio: Boolean, val needsText: Boolean)
+    // 每个进程只有一个扫描协程。缓存只对应本进程的三个 schema 版本。
+    private val sidecarChecks = mutableMapOf<File, ScanResult<Boolean>>()
+    private val transcriptChecks = mutableMapOf<File, ScanResult<TranscriptChecks>>()
 
     fun sceneDir(ctx: Context) = File(ctx.filesDir, "scenes").apply { mkdirs() }
 
@@ -146,8 +151,40 @@ internal object SceneAndMood {
         }
     }
 
-    private suspend fun runBackgroundScanOnce(ctx: Context) {
+    private fun inspectTranscript(root: JSONObject): TranscriptChecks {
+        val audioVersion = root.optInt("sm_audio_ver", 0)
+        val missingAcoustics = audioVersion >= AUDIO_SCHEMA_VERSION && runCatching {
+            root.optJSONArray("segments")?.let { segments ->
+                (0 until segments.length()).any { index ->
+                    val segment = segments.getJSONObject(index)
+                    !segment.has("db") || !segment.has("proximity")
+                }
+            } == true
+        }.getOrDefault(false)
+        return TranscriptChecks(
+            needsAudio = audioVersion < AUDIO_SCHEMA_VERSION || missingAcoustics,
+            needsText = audioVersion < TEXT_SCHEMA_VERSION && root.optInt("sm_text_ver", 0) < TEXT_SCHEMA_VERSION,
+        )
+    }
+
+    private fun <T> MutableMap<File, ScanResult<T>>.inspect(
+        file: File,
+        readJson: (File) -> JSONObject,
+        check: (JSONObject) -> T,
+    ): T? {
+        val stamp = file.scanStamp() ?: return null
+        this[file]?.let { if (it.stamp == stamp) return it.result }
+        val result = runCatching { check(readJson(file)) }.getOrNull() ?: return null
+        if (file.scanStamp() == stamp) this[file] = ScanResult(stamp, result)
+        return result
+    }
+
+    internal suspend fun runBackgroundScanOnce(
+        ctx: Context,
+        readJson: (File) -> JSONObject = { JSONObject(it.readText()) },
+    ) {
         val chunkDir = RecorderService.chunkDir(ctx)
+        val scenes = sceneDir(ctx)
         var dirtyBatch = 0
 
         fun flushUiIfNeeded(force: Boolean = false) {
@@ -159,32 +196,31 @@ internal object SceneAndMood {
 
         // Pass 1: 优先处理已有转写的对话录音（让「文字」页秒级出标），再后台补齐其余无人声/待转写 .opus 片段
         val trDir = Transcripts.dir(ctx)
+        val transcribed = trDir.list()?.toHashSet().orEmpty()
+        val sidecars = scenes.list()?.toHashSet().orEmpty()
         val opusFiles = chunkDir.listFiles()
             ?.filter { Crypto.audioName.matches(it.name) && it.length() > 0 }
             ?.sortedWith(
-                compareByDescending<File> { File(trDir, "${it.name}.json").exists() }
+                compareByDescending<File> { "${it.name}.json" in transcribed }
                     .thenByDescending { it.name },
             )
             ?: emptyList()
 
+        val rememberTranscript: (File, JSONObject) -> Unit = { file, root ->
+            file.scanStamp()?.let { transcriptChecks[file] = ScanResult(it, inspectTranscript(root)) }
+        }
         val sceneOn = Features.scene(ctx)
         for (opus in opusFiles) {
             val name = opus.name
-            val sidecarFile = File(sceneDir(ctx), "$name.json")
-            val hasSidecar = sidecarFile.exists() &&
-                runCatching { JSONObject(sidecarFile.readText()).optInt("ver", 0) >= SCENE_SIDECAR_VERSION }.getOrDefault(false)
+            val jsonName = "$name.json"
+            val sidecarFile = File(scenes, jsonName)
+            val hasSidecar = sceneOn && (jsonName in sidecars || sidecarFile.exists()) && sidecarChecks.inspect(sidecarFile, readJson) {
+                it.optInt("ver", 0) >= SCENE_SIDECAR_VERSION
+            } == true
 
-            val trFile = File(Transcripts.dir(ctx), "$name.json")
-            val trNeedsAudio = trFile.exists() && runCatching {
-                val r = JSONObject(trFile.readText())
-                r.optInt("sm_audio_ver", 0) < AUDIO_SCHEMA_VERSION ||
-                    (r.optJSONArray("segments")?.let { segs ->
-                        (0 until segs.length()).any { idx ->
-                            val s = segs.getJSONObject(idx)
-                            !s.has("db") || !s.has("proximity")
-                        }
-                    } == true)
-            }.getOrDefault(false)
+            val trFile = File(trDir, jsonName)
+            val trNeedsAudio = (jsonName in transcribed || trFile.exists()) &&
+                transcriptChecks.inspect(trFile, readJson, ::inspectTranscript)?.needsAudio == true
 
             // 环境音识别关闭时只为心情/分贝补算，不跑环境音模型、不写 sidecar（重新打开后再补）
             if ((hasSidecar || !sceneOn) && !trNeedsAudio) continue
@@ -193,11 +229,16 @@ internal object SceneAndMood {
             if (pcm == null || pcm.isEmpty()) continue
 
             val tags = if (hasSidecar || !sceneOn) getSceneTags(ctx, name) else {
-                detectSceneTags(ctx, pcm).also { saveSceneSidecar(ctx, name, it) }
+                detectSceneTags(ctx, pcm).also {
+                    saveSceneSidecar(ctx, name, it)
+                    if (it.isNotEmpty()) sidecarFile.scanStamp()?.let { stamp ->
+                        sidecarChecks[sidecarFile] = ScanResult(stamp, true)
+                    }
+                }
             }
 
             if (trFile.exists()) {
-                val updated = Transcripts.computeAndCommit(ctx, name) { root ->
+                val updated = Transcripts.computeAndCommit(ctx, name, onCommitted = rememberTranscript) { root ->
                     enrichWithPcmAndTags(ctx, pcm, tags, root)
                     true
                 }
@@ -213,14 +254,10 @@ internal object SceneAndMood {
         val allTrNames = Transcripts.allNames(ctx).sortedDescending()
         for (name in allTrNames) {
             if (File(chunkDir, name).exists()) continue
-            val trFile = File(Transcripts.dir(ctx), "$name.json")
-            val needsText = runCatching {
-                val r = JSONObject(trFile.readText())
-                r.optInt("sm_audio_ver", 0) < TEXT_SCHEMA_VERSION && r.optInt("sm_text_ver", 0) < TEXT_SCHEMA_VERSION
-            }.getOrDefault(false)
-            if (!needsText) continue
+            val trFile = File(trDir, "$name.json")
+            if (transcriptChecks.inspect(trFile, readJson, ::inspectTranscript)?.needsText != true) continue
 
-            val updated = Transcripts.computeAndCommit(ctx, name) { root ->
+            val updated = Transcripts.computeAndCommit(ctx, name, onCommitted = rememberTranscript) { root ->
                 enrichTextOnly(ctx, root)
                 true
             }
@@ -233,7 +270,10 @@ internal object SceneAndMood {
 
         // 清理原音频和文字都已不存在的孤立场景缓存
         val validNames = (opusFiles.map { it.name } + allTrNames).toHashSet()
-        sceneDir(ctx).listFiles()?.forEach { f ->
+        val transcriptNames = allTrNames.toHashSet()
+        transcriptChecks.keys.removeAll { it.parentFile != trDir || it.name.removeSuffix(".json") !in transcriptNames }
+        sidecarChecks.keys.removeAll { it.parentFile != scenes || it.name.removeSuffix(".json") !in validNames }
+        scenes.listFiles()?.forEach { f ->
             val base = f.name.removeSuffix(".json")
             if (base !in validNames) {
                 f.delete()

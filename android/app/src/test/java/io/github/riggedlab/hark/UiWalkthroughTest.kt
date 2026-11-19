@@ -76,7 +76,7 @@ class UiWalkthroughTest {
             ctx,
             JSONObject()
                 .put("name", rec1)
-                .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+                .put("vp_ver", Voiceprint.ASSIGN_VERSION)
                 .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
                 .put("duration_s", 298.0)
                 .put("text", "所以感觉还是要先把插件接口收敛干净。好的没问题，周五下午三点过一遍硬件打样结构。")
@@ -98,7 +98,7 @@ class UiWalkthroughTest {
             ctx,
             JSONObject()
                 .put("name", rec2)
-                .put("vp_ver", Voiceprint.SCHEMA_VERSION)
+                .put("vp_ver", Voiceprint.ASSIGN_VERSION)
                 .put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION)
                 .put("duration_s", 185.0)
                 .put("text", "备忘一下今晚跑通本地 hark timeline 查询。")

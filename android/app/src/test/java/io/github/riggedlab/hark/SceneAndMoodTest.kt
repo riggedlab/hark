@@ -2,6 +2,7 @@ package io.github.riggedlab.hark
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -122,6 +123,40 @@ class SceneAndMoodTest {
         val tags = SceneAndMood.getSceneTags(ctx, noAsrName)
         assertEquals(2, tags.size)
         assertEquals("敲键盘", tags[0].label)
+    }
+
+    @Test
+    fun backgroundScanParsesOnlyChangedSidecarsAndTranscripts() = runBlocking {
+        val ctx = ApplicationProvider.getApplicationContext<Context>()
+        val current = "20261113-130501.opus"
+        val historical = "20261113-130502.opus"
+        File(RecorderService.chunkDir(ctx).apply { mkdirs() }, current).writeBytes(byteArrayOf(1))
+        SceneAndMood.saveSceneSidecar(ctx, current, listOf(SceneTag("室内安静", 0.76f)))
+        Transcripts.save(ctx, JSONObject().put("name", current).put("sm_audio_ver", SceneAndMood.AUDIO_SCHEMA_VERSION))
+        Transcripts.save(ctx, JSONObject().put("name", historical).put("sm_text_ver", 2))
+        val liveTranscript = File(Transcripts.dir(ctx), "$current.json")
+        val oldTranscript = File(Transcripts.dir(ctx), "$historical.json")
+        val sidecar = File(SceneAndMood.sceneDir(ctx), "$current.json")
+        val parsed = mutableListOf<File>()
+        suspend fun scan() = SceneAndMood.runBackgroundScanOnce(ctx) { file ->
+            parsed += file
+            JSONObject(file.readText())
+        }
+
+        scan()
+        assertEquals(listOf(sidecar, liveTranscript, oldTranscript), parsed)
+        parsed.clear()
+        scan()
+        assertTrue(parsed.isEmpty())
+
+        SceneAndMood.saveSceneSidecar(ctx, current, listOf(SceneTag("敲键盘", 0.84f)))
+        Transcripts.save(ctx, JSONObject().put("name", historical))
+        scan()
+        assertEquals(listOf(sidecar, oldTranscript), parsed)
+        assertEquals(2, JSONObject(oldTranscript.readText()).getInt("sm_text_ver"))
+        parsed.clear()
+        scan()
+        assertTrue(parsed.isEmpty())
     }
 
     @Test

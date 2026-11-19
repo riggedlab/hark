@@ -217,7 +217,12 @@ object Transcripts {
      * 乐观无锁重计算 + 双阶段 SeqLock 纪元提交：
      * 重型推理（ONNX/音频解码）100% 在锁外执行，绝不阻塞跨线程实时 save()；若期间发生并发覆盖则基于最新文本重试一次。
      */
-    fun computeAndCommit(ctx: Context, name: String, computeOutsideLock: (JSONObject) -> Boolean): Boolean {
+    fun computeAndCommit(
+        ctx: Context,
+        name: String,
+        onCommitted: ((File, JSONObject) -> Unit)? = null,
+        computeOutsideLock: (JSONObject) -> Boolean,
+    ): Boolean {
         val file = File(dir(ctx), "$name.json")
         repeat(2) {
             val epochBefore: Long
@@ -242,6 +247,7 @@ object Transcripts {
                     } finally {
                         ep.incrementAndGet() // even = 替换完成
                     }
+                    onCommitted?.invoke(file, workingCopy)
                     return true
                 }
             }

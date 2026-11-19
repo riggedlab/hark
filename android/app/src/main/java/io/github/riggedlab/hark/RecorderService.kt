@@ -27,7 +27,6 @@ class RecorderService : Service() {
     private lateinit var chunks: ChunkRecorder
     private val io = Executors.newSingleThreadScheduledExecutor()   // 写录音文件都在这个线程
     private val net = Executors.newSingleThreadScheduledExecutor()  // 判断人声、上传、取文字（比较慢，不能挡住写录音）
-    private var wakeLock: PowerManager.WakeLock? = null
     private var bytesThisSecond = 0
     private lateinit var uploader: Uploader
     private var started = false
@@ -125,10 +124,16 @@ class RecorderService : Service() {
             net.execute {
                 // 单线程防重入；执行中产生的新片段再排一次，不等下一分钟
                 syncQueued.set(false)
-                val (ok, left) = uploader.processPending()
-                AppState.update { it.copy(pendingUploads = left, uploadedThisSession = it.uploadedThisSession + ok) }
-                if (Config.mode(this@RecorderService) == WorkMode.CLOUD) {
-                    runBlocking { Sync.pollOnce(this@RecorderService) }
+                if (closing) return@execute
+                val lock = acquireWorkWakeLock("hark:recorder-sync")
+                try {
+                    val (ok, left) = uploader.processPending()
+                    AppState.update { it.copy(pendingUploads = left, uploadedThisSession = it.uploadedThisSession + ok) }
+                    if (Config.mode(this@RecorderService) == WorkMode.CLOUD) {
+                        runBlocking { Sync.pollOnce(this@RecorderService) }
+                    }
+                } finally {
+                    lock.release()
                 }
             }
         } catch (_: RejectedExecutionException) { syncQueued.set(false) }
@@ -148,10 +153,6 @@ class RecorderService : Service() {
         if (intent?.action == ACTION_REFRESH && started) { Places.requestFix(this); return START_STICKY }
         val wasStarted = started
         started = true
-        if (wakeLock == null) {
-            wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "hark:recorder").apply { acquire() }
-        }
         if (intent?.action == ACTION_REPAIR) ble.repair()
         else if (!wasStarted) ble.start()
         if (closing) return START_NOT_STICKY
@@ -169,33 +170,46 @@ class RecorderService : Service() {
 
     override fun onDestroy() {
         closing = true
-        main.removeCallbacksAndMessages(null)
-        if (::ble.isInitialized) ble.stop()
-        LiveAudioMonitor.stop()
-        val ctx = applicationContext
-        if (::chunks.isInitialized) finishRecording(io, closeChunk = {
-            try { chunks.closeChunk() }
-            finally { wakeLock?.release(); wakeLock = null }
-        }, upload = {
-            try {
-                val finalUploader = Uploader(ctx)
-                if (finalUploader.hasPendingWork()) {
-                    val (done, pending) = finalUploader.processPending()
-                    AppState.update { it.copy(pendingUploads = pending,
-                        uploadedThisSession = it.uploadedThisSession + done) }
-                    if (Config.mode(ctx) == WorkMode.CLOUD) {
-                        runBlocking { Sync.pollOnce(ctx, 0) }
+        val lock = acquireWorkWakeLock("hark:recorder-finish")
+        var finishQueued = false
+        try {
+            main.removeCallbacksAndMessages(null)
+            if (::ble.isInitialized) ble.stop()
+            LiveAudioMonitor.stop()
+            val ctx = applicationContext
+            if (::chunks.isInitialized) {
+                // 封段排在待写录音之后，锁交给异步收尾，覆盖最后一段的同步。
+                finishRecording(io, closeChunk = chunks::closeChunk, onFinished = lock::release) {
+                    try {
+                        val finalUploader = Uploader(ctx)
+                        if (finalUploader.hasPendingWork()) {
+                            val (done, pending) = finalUploader.processPending()
+                            AppState.update { it.copy(pendingUploads = pending,
+                                uploadedThisSession = it.uploadedThisSession + done) }
+                            if (Config.mode(ctx) == WorkMode.CLOUD) {
+                                runBlocking { Sync.pollOnce(ctx, 0) }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("RecorderService", "最后一段待下次前台同步重试", e)
                     }
                 }
-            } catch (e: Exception) {
-                android.util.Log.w("RecorderService", "最后一段待下次前台同步重试", e)
+                finishQueued = true
             }
-        })
-        net.shutdownNow()
-        io.shutdown()
-        AppState.update { it.copy(link = LinkState.STOPPED, lastWriteNanos = 0, bytesPerSec = 0) }
-        super.onDestroy()
+            net.shutdownNow()
+            io.shutdown()
+            AppState.update { it.copy(link = LinkState.STOPPED, lastWriteNanos = 0, bytesPerSec = 0) }
+            super.onDestroy()
+        } finally {
+            if (!finishQueued) lock.release()
+        }
     }
+
+    private fun acquireWorkWakeLock(tag: String): PowerManager.WakeLock =
+        getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag).apply {
+            setReferenceCounted(false)
+            acquire(WORK_WAKE_TIMEOUT_MS)
+        }
 
     private fun startForegroundCompat(): Boolean {
         try {
@@ -251,6 +265,8 @@ class RecorderService : Service() {
         const val ACTION_REPAIR = "repair"
         private const val CHANNEL = "recorder"
         private const val NOTIF_ID = 1
+        // 单次手机 ASR 最长连接 15s + 读取 180s，留少量时间给本地收尾。
+        private const val WORK_WAKE_TIMEOUT_MS = 210_000L
         fun chunkDir(ctx: Context) = File(ctx.filesDir, "chunks")
     }
 }
